@@ -5,6 +5,8 @@ import sys
 from glob import glob
 from pathlib import Path
 
+TRANSPORT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "transport"
+
 import numpy as np
 from ase.io import write
 from ase.io.trajectory import Trajectory
@@ -60,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("li_density.cube"),
+        default=TRANSPORT_RESULTS / "li_density.cube",
         help="Output volumetric file (.cube).",
     )
     parser.add_argument(

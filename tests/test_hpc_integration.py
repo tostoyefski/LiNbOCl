@@ -12,7 +12,7 @@ from pymatgen.core import Structure
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = REPO / "mattergen_webapp" / "scripts"
+SCRIPTS = REPO / "workflow" / "pipeline"
 
 STUB = '''import json
 import os
@@ -61,16 +61,16 @@ def read_rows(path):
 
 
 def invoke_hpc(tmp_path, overrides):
-    # An isolated copy exercises script paths containing spaces and keeps the
-    # legacy export-index copy away from the user's checkout.
-    webapp = tmp_path / "web app"
-    scripts = webapp / "scripts"
+    # An isolated project exercises relocated script paths containing spaces.
+    project = tmp_path / "project with spaces"
+    workflow = project / "workflow"
+    scripts = workflow / "pipeline"
     scripts.mkdir(parents=True)
-    for name in ("run_full_pipeline_hpc.sh", "dd.sh", "eval_all.sh", "screen_all_extxyz.py",
+    for name in ("run_full_pipeline.sh", "generate.sh", "evaluate.sh", "screen_all_extxyz.py",
                  "run_top300_pipeline.py", "candidate_selection.py", "export_refs_to_structs.py"):
         shutil.copyfile(SCRIPTS / name, scripts / name)
-    (webapp / "results").mkdir()
-    mattergen = tmp_path / "mattergen work dir"
+    (project / "results").mkdir()
+    mattergen = project / "mattergen"
     mattergen.mkdir()
     results = tmp_path / "pipeline results"
     bin_dir = tmp_path / "fake commands"
@@ -92,7 +92,7 @@ def invoke_hpc(tmp_path, overrides):
         "REAL_PYTHON": sys.executable,
         "GPU_STUB": str(stub),
         "COMMAND_LOG": str(command_log),
-        "WEBAPP_ROOT": str(webapp),
+        "WORKFLOW_ROOT": str(workflow),
         "MATTERGEN_ROOT": str(mattergen),
         "RESULTS_ROOT": str(results),
         "RUNTIME_ROOT": str(tmp_path / "runtime cache"),
@@ -124,12 +124,15 @@ def invoke_hpc(tmp_path, overrides):
                     "USE_SMACT", "FILTER_LIGHT_OXY", "SELECTION_MODE", "VOLTAGE_THRESHOLD",
                     "TARGET_VOLTAGE", "MIN_VOLTAGE_WINDOW"):
             env.pop(key)
-    process = subprocess.run(["bash", str(scripts / "run_full_pipeline_hpc.sh")],
+    env.pop("WEBAPP_ROOT", None)
+    process = subprocess.run(["bash", str(scripts / "run_full_pipeline.sh")],
                              env=env, text=True, capture_output=True, timeout=90)
     assert process.returncode == 0, process.stdout + process.stderr
     commands = [json.loads(line) for line in command_log.read_text().splitlines()]
     screen_command = next(cmd for cmd in commands if cmd[0].endswith("/screen_all_extxyz.py"))
     top_command = next(cmd for cmd in commands if cmd[0].endswith("/run_top300_pipeline.py"))
+    assert Path(screen_command[0]) == scripts / "screen_all_extxyz.py"
+    assert Path(top_command[0]) == scripts / "run_top300_pipeline.py"
     return results, screen_command, top_command, process.stdout
 
 
@@ -160,6 +163,7 @@ def assert_export_matches_selection(results, expected_unique):
 
 def test_hpc_defaults_filter_chemistry_and_deduplicate_before_export(tmp_path):
     results, screen_command, top_command, stdout = invoke_hpc(tmp_path, {})
+    assert Path(value(screen_command, "--refs-out")) == results / "screen_refs.txt"
     assert "--require-charge-balance" in screen_command
     assert "--use-smact" in screen_command
     assert "--no-light-oxy" not in screen_command

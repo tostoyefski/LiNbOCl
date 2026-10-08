@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "mattergen_webapp" / "scripts" / "dd.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "workflow" / "pipeline" / "generate.sh"
 
 
 def invoke(tmp_path, systems):

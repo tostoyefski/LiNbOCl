@@ -349,12 +349,15 @@ def screen_structure(struct, *, r_cut=3.0, required_elements=("Li",), allowed_el
     return row
 
 
+DEFAULT_RESULTS = Path(__file__).resolve().parents[2] / "results"
+
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--workdir", default=".", help="执行目录（所有相对路径均相对该目录）")
-    ap.add_argument("--base", default="results/chemical_system_energy_above_hull", help="递归查找 relaxed.extxyz 的根目录")
-    ap.add_argument("--out", default="results/stage2_candidates.csv", help="接受样品 CSV")
-    ap.add_argument("--screened-out", default="screened_out.csv", help="拒绝/错误审计 CSV（总会写出）")
+    ap.add_argument("--base", default=str(DEFAULT_RESULTS), help="递归查找 relaxed.extxyz 的根目录")
+    ap.add_argument("--out", default=str(DEFAULT_RESULTS / "stage2_candidates.csv"), help="接受样品 CSV")
+    ap.add_argument("--screened-out", default=None, help="拒绝/错误审计 CSV（总会写出）")
     ap.add_argument("--r-cut", type=float, default=3.0, help="Li 周期图邻接截断 (Å)，仅为几何代理")
     ap.add_argument("--super", type=int, nargs=3, default=(2, 2, 2), help="兼容参数；周期 image 图不需要复制超胞")
     ap.add_argument("--required-elements", nargs="+", default=["Li"], help="必须出现的元素；目标体系可用 Li Nb O Cl（默认 Li）")
@@ -372,7 +375,7 @@ def build_parser():
     ap.add_argument("--oxidation-states", action="append", default=[], metavar="ELEMENT=VALENCES", help="覆盖价态假设，例如 --oxidation-states Nb=3,4,5")
     ap.add_argument("--max-chem-sites", type=int, default=128, help="约简计量式的价态枚举上限；超限以 unknown 拒绝")
     ap.add_argument("--topk", type=int, default=150, help="几何代理排序引用数量，未经 DFT/MD 验证")
-    ap.add_argument("--refs-out", default="top150_refs.txt", help="几何排序引用列表，格式 path::frame")
+    ap.add_argument("--refs-out", default=None, help="几何排序引用列表，格式 path::frame")
     return ap
 
 
@@ -403,7 +406,9 @@ def main(argv=None):
         ap.error("workdir does not exist")
     # Resolve paths without changing process CWD, so callers remain unaffected.
     resolve = lambda p: Path(p) if Path(p).is_absolute() else workdir / p
-    out, rejected_out, refs_out = map(resolve, (args.out, args.screened_out, args.refs_out))
+    out = resolve(args.out)
+    rejected_out = resolve(args.screened_out) if args.screened_out else out.with_name("screened_out.csv")
+    refs_out = resolve(args.refs_out) if args.refs_out else out.with_name("screen_refs.txt")
     for path in (out, rejected_out, refs_out):
         path.parent.mkdir(parents=True, exist_ok=True)
     rows, rejected, cache = [], [], {}

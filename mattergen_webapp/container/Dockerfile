@@ -6,9 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     PATH=/opt/mattergen-venv/bin:$PATH \
     MATTERGEN_ROOT=/workspace/mattergen \
-    WEBAPP_ROOT=/workspace/mattergen_webapp \
+    WORKFLOW_ROOT=/workspace/workflow \
     MATTERGEN_RUNTIME_ROOT=/runs/_runtime \
-    RESULTS_ROOT=/runs/results200 \
+    RESULTS_ROOT=/runs/results \
     RUNTIME_ROOT=/runs/_runtime \
     TMPDIR=/runs/_runtime/tmp \
     HF_HOME=/runs/_runtime/huggingface \
@@ -47,6 +47,7 @@ WORKDIR /workspace
 
 COPY mattergen /workspace/mattergen
 COPY mattergen_webapp /workspace/mattergen_webapp
+COPY workflow /workspace/workflow
 
 RUN . /opt/mattergen-venv/bin/activate \
     && cd /workspace/mattergen \
@@ -58,7 +59,7 @@ import torch
 print("torch", torch.__version__, "cuda", torch.version.cuda)
 PY
 
-RUN mkdir -p /runs /runs/_runtime /runs/results200
+RUN mkdir -p /runs /runs/_runtime /runs/results
 
 WORKDIR /workspace/mattergen_webapp
 

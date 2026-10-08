@@ -1,3 +1,4 @@
+.DS_Store
 .venv/
 venv/
 __pycache__/
@@ -27,4 +28,3 @@ _runtime/
 checkpoints/
 data-release/
 .mattergen_docker_context/
-/mattergen_webapp/analysis/

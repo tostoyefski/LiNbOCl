@@ -11,10 +11,10 @@ from pymatgen.core import Lattice, Structure
 REPO = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(params=["mattergen_webapp/scripts", "mattergen"])
-def hull_module(request):
-    path = REPO / request.param / "compute_ehull_chgnet.py"
-    name = "hull_manifest_" + request.param.replace("/", "_")
+@pytest.fixture
+def hull_module():
+    path = REPO / "workflow" / "pipeline" / "compute_ehull_chgnet.py"
+    name = "hull_manifest_workflow_pipeline"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -79,3 +79,11 @@ def test_manifest_requires_cif_column(hull_module, tmp_path):
     manifest.write_text("ref,filename\nsource.extxyz::0,selected.cif\n")
     with pytest.raises(ValueError, match="cif column"):
         hull_module.load_candidate_structures(tmp_path, manifest)
+
+
+def test_hull_cli_default_paths_use_current_top300_run(hull_module, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["compute_ehull_chgnet.py"])
+    args = hull_module.parse_args()
+    output = REPO / "results" / "top300_run"
+    assert Path(args.cif_dir) == output / "exported_300cifs"
+    assert Path(args.out) == output / "chgnet_hull_top300.csv"

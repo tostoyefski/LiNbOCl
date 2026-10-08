@@ -15,15 +15,15 @@ from pymatgen.core import Composition, Element
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(params=["mattergen_webapp/scripts", "mattergen"])
-def voltage_module(request, monkeypatch):
+@pytest.fixture
+def voltage_module(monkeypatch):
     # Any eager model or API dependency now fails the import, ensuring these
     # regressions remain usable in the small, pure-pymatgen environment.
     for name in ("chgnet", "mp_api", "compute_ehull_chgnet"):
         monkeypatch.setitem(sys.modules, name, None)
-    module_name = "voltage_under_test_" + request.param.replace("/", "_")
+    module_name = "voltage_under_test_workflow_pipeline"
     spec = importlib.util.spec_from_file_location(
-        module_name, ROOT / request.param / "compute_voltage_window.py"
+        module_name, ROOT / "workflow" / "pipeline" / "compute_voltage_window.py"
     )
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, module)
@@ -168,6 +168,9 @@ def test_cli_keeps_strict_tolerance_and_no_implicit_target(voltage_module):
     args = voltage_module.parse_args([])
     assert args.threshold == 1e-3
     assert args.target_voltage is None
+    output = ROOT / "results" / "top300_run"
+    assert Path(args.stable_csv) == output / "chgnet_hull_top300_filtered.csv"
+    assert Path(args.out) == output / "chgnet_voltage_window_top300.csv"
 
 
 @pytest.mark.parametrize(

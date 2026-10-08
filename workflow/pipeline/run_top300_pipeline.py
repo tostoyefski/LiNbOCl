@@ -8,7 +8,6 @@ import csv
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,21 +15,21 @@ from typing import Iterable, List
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPTS_DIR.parent
+PROJECT_ROOT = SCRIPTS_DIR.parents[1]
 DEFAULT_RESULTS = PROJECT_ROOT / "results"
 
 
-def parse_args(argv=None, *, legacy_defaults=False) -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run top-K CIF export and voltage window pipeline.")
     parser.add_argument("--workdir", type=Path, default=Path("."), help="执行目录（通常为 mattergen 仓库根）")
-    parser.add_argument("--output-dir", type=Path, default=Path(".") if legacy_defaults else DEFAULT_RESULTS / "top300_run", help="统一的输出目录（refs/hull/voltage等都放这里）")
-    parser.add_argument("--stage2-csv", type=Path, default=Path("results/stage2_candidates.csv") if legacy_defaults else DEFAULT_RESULTS / "stage2_candidates.csv", help="CSV produced by screen_all_extxyz.py.")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_RESULTS / "top300_run", help="统一的输出目录（refs/hull/voltage等都放这里）")
+    parser.add_argument("--stage2-csv", type=Path, default=DEFAULT_RESULTS / "stage2_candidates.csv", help="CSV produced by screen_all_extxyz.py.")
     parser.add_argument("--topk", type=int, default=300, help="Maximum number of unique candidates to export.")
     parser.add_argument("--selection-mode", choices=("diverse", "score"), default="diverse", help="Select by composition round-robin (default), or proxy score; both deduplicate structures first.")
     parser.add_argument("--selection-audit", type=Path, default=None, help="CSV recording selection, duplicates and unreadable inputs.")
-    parser.add_argument("--refs-out", type=Path, default=Path("top300_refs.txt") if legacy_defaults else None, help="Output file storing path::frame references.")
+    parser.add_argument("--refs-out", type=Path, default=None, help="Output file storing path::frame references.")
     parser.add_argument("--export-script", type=Path, default=SCRIPTS_DIR / "export_refs_to_structs.py", help="Path to export_refs_to_structs.py.")
-    parser.add_argument("--export-dir", type=Path, default=Path("results/exported_300cifs") if legacy_defaults else None, help="Directory where CIF files will be written.")
+    parser.add_argument("--export-dir", type=Path, default=None, help="Directory where CIF files will be written.")
     parser.add_argument("--export-prefix", default="cand300", help="Filename prefix for exported CIFs.")
     parser.add_argument("--export-index-name", default=None, help="Filename (within export-dir) for the CIF index CSV.")
     parser.add_argument("--ehull-script", type=Path, default=SCRIPTS_DIR / "compute_ehull_chgnet.py", help="Path to compute_ehull_chgnet.py.")
@@ -118,13 +117,6 @@ def rename_index(index_path: Path, target_name: str) -> Path:
     if index_path != target_path:
         index_path.replace(target_path)
     print(f"[INFO] Renamed index to {target_path}")
-    root_target = DEFAULT_RESULTS / target_name
-    try:
-        if root_target.resolve() != target_path.resolve():
-            shutil.copyfile(target_path, root_target)
-            print(f"[INFO] Copied index to repository root: {root_target}")
-    except OSError as exc:
-        print(f"[WARN] Failed to copy index to {root_target}: {exc}")
     return target_path
 
 
@@ -244,8 +236,8 @@ def filter_voltage(stable_csv: Path, voltage_csv: Path, final_csv: Path,
     return len(kept)
 
 
-def main(argv=None, *, legacy_defaults=False) -> None:
-    args = parse_args(argv, legacy_defaults=legacy_defaults)
+def main(argv=None) -> None:
+    args = parse_args(argv)
     workdir = args.workdir.resolve()
     os.chdir(workdir)
     output_dir = args.output_dir.resolve()

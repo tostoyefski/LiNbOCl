@@ -2,8 +2,8 @@
 """FastAPI wrapper around MatterGen batch scripts.
 
 Endpoints:
-- /api/run/dd           -> run dd.sh with parameter overrides
-- /api/run/eval         -> run eval_all.sh
+- /api/run/dd           -> run generate.sh with parameter overrides
+- /api/run/eval         -> run evaluate.sh
 - /api/run/screen       -> run screen_all_extxyz.py
 - /api/run/top300       -> run run_top300_pipeline.py
 - /api/jobs             -> list jobs
@@ -41,13 +41,14 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent.parent
 DEFAULT_MATTERGEN_ROOT = REPO_ROOT / "mattergen"
 MATTERGEN_ROOT = Path(os.environ.get("MATTERGEN_ROOT", DEFAULT_MATTERGEN_ROOT)).resolve()
-SCRIPTS_DIR = REPO_ROOT / "mattergen_webapp" / "scripts"
+WORKFLOW_ROOT = Path(os.environ.get("WORKFLOW_ROOT", REPO_ROOT / "workflow")).resolve()
+SCRIPTS_DIR = WORKFLOW_ROOT / "pipeline"
 LOG_DIR = ROOT / "job_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_RUNTIME_ROOT = Path(os.environ.get("MATTERGEN_RUNTIME_ROOT", "/mnt/e/mattergen_runs/_runtime")).expanduser()
+DEFAULT_RUNTIME_ROOT = Path(os.environ.get("MATTERGEN_RUNTIME_ROOT", str(REPO_ROOT / "_runtime"))).expanduser().resolve()
 DEFAULT_RESULTS_ROOT = Path(
-    os.environ.get("MATTERGEN_DEFAULT_RESULTS_DIR", os.environ.get("RESULTS_ROOT", "/mnt/e/mattergen_runs/results200"))
-).expanduser()
+    os.environ.get("MATTERGEN_DEFAULT_RESULTS_DIR", os.environ.get("RESULTS_ROOT", str(REPO_ROOT / "results")))
+).expanduser().resolve()
 
 
 class JobStatus(str):
@@ -221,8 +222,8 @@ def tail_log(log_path: Path, lines: int = 2000) -> str:
 
 
 class GenerateRequest(BaseModel):
-    model_name: str = Field("chemical_system_energy_above_hull", description="MODEL_NAME env for dd.sh")
-    base_results_dir: str = Field("results/chemical_system_energy_above_hull", description="BASE_RESULTS_DIR env")
+    model_name: str = Field("chemical_system_energy_above_hull", description="MODEL_NAME env for generate.sh")
+    base_results_dir: str = Field(str(DEFAULT_RESULTS_ROOT), description="BASE_RESULTS_DIR env")
     batch_size: int = 16
     num_batches: int = Field(1, ge=1, description="mattergen-generate --num_batches")
     e_ah: float = 0.05
@@ -234,12 +235,12 @@ class GenerateRequest(BaseModel):
 
 
 class EvalRequest(BaseModel):
-    root: str = Field("results/chemical_system_energy_above_hull", description="ROOT env passed to eval_all.sh")
+    root: str = Field(str(DEFAULT_RESULTS_ROOT), description="ROOT env passed to evaluate.sh")
 
 
 class ScreenRequest(BaseModel):
-    base: str = "results/chemical_system_energy_above_hull"
-    out: str = "results/stage2_candidates.csv"
+    base: str = str(DEFAULT_RESULTS_ROOT)
+    out: str = str(DEFAULT_RESULTS_ROOT / "stage2_candidates.csv")
     r_cut: float = Field(3.0, gt=0)
     supercell: List[int] = Field(default_factory=lambda: [2, 2, 2], min_items=3, max_items=3)
     light_oxy: List[float] = Field(default_factory=lambda: [0.05, 0.35], min_items=2, max_items=2)
@@ -249,7 +250,7 @@ class ScreenRequest(BaseModel):
     require_charge_balance: bool = True
     use_smact: bool = True
     topk: int = Field(150, ge=1)
-    refs_out: str = "top150_refs.txt"
+    refs_out: str = str(DEFAULT_RESULTS_ROOT / "screen_refs.txt")
 
     @validator("supercell")
     def _super_len(cls, v: List[int]) -> List[int]:
@@ -289,12 +290,12 @@ class ScreenRequest(BaseModel):
 
 
 class Top300Request(BaseModel):
-    stage2_csv: str = "results/stage2_candidates.csv"
+    stage2_csv: str = str(DEFAULT_RESULTS_ROOT / "stage2_candidates.csv")
     topk: int = Field(300, ge=1)
     selection_mode: Literal["diverse", "score"] = "diverse"
     refs_out: str = "top300_refs.txt"
     output_dir: Optional[str] = None
-    export_dir: str = "results/exported_300cifs"
+    export_dir: str = "exported_300cifs"
     export_prefix: str = "cand300"
     export_index_name: str = "export_300index.csv"
     ehull_threshold: float = Field(0.05, ge=0)
@@ -362,6 +363,7 @@ def defaults():
         "eval_root": base,
         "screen_base": base,
         "screen_out": str(DEFAULT_RESULTS_ROOT / "stage2_candidates.csv"),
+        "screen_refs_out": str(DEFAULT_RESULTS_ROOT / "screen_refs.txt"),
         "top300_stage2_csv": str(DEFAULT_RESULTS_ROOT / "stage2_candidates.csv"),
         "top300_output_dir": top_dir,
         "top300_export_dir": str(DEFAULT_RESULTS_ROOT / "top300_run" / "exported_300cifs"),
@@ -372,7 +374,7 @@ def defaults():
 
 @app.post("/api/run/dd")
 def run_dd(payload: GenerateRequest):
-    script = ensure_script("dd.sh")
+    script = ensure_script("generate.sh")
     env = {
         "MODEL_NAME": payload.model_name,
         "BASE_RESULTS_DIR": payload.base_results_dir,
@@ -392,7 +394,7 @@ def run_dd(payload: GenerateRequest):
 
 @app.post("/api/run/eval")
 def run_eval(payload: EvalRequest):
-    script = ensure_script("eval_all.sh")
+    script = ensure_script("evaluate.sh")
     env = {"ROOT": payload.root, "WORKDIR": MATTERGEN_ROOT}
     job = launch_job("eval", ["bash", str(script)], env=env, params=payload.dict())
     return job
@@ -442,13 +444,19 @@ def run_screen(payload: ScreenRequest):
 @app.post("/api/run/top300")
 def run_top300(payload: Top300Request):
     script = ensure_script("run_top300_pipeline.py")
+    output_dir = Path(payload.output_dir or (DEFAULT_RESULTS_ROOT / "top300_run"))
+
+    def output_path(value: str) -> str:
+        path = Path(value)
+        return str(path if path.is_absolute() else output_dir / path)
+
     cmd = [
         "python",
         str(script),
         "--workdir",
         str(MATTERGEN_ROOT),
         "--output-dir",
-        payload.output_dir or str(SCRIPTS_DIR.parent / "results"),
+        str(output_dir),
         "--stage2-csv",
         payload.stage2_csv,
         "--topk",
@@ -456,9 +464,9 @@ def run_top300(payload: Top300Request):
         "--selection-mode",
         payload.selection_mode,
         "--refs-out",
-        payload.refs_out,
+        output_path(payload.refs_out),
         "--export-dir",
-        payload.export_dir,
+        output_path(payload.export_dir),
         "--export-prefix",
         payload.export_prefix,
         "--export-index-name",
@@ -513,22 +521,30 @@ def _full_segment_dir(base: Path, offset: int) -> Path:
 
 
 def _remap_results_path(path: Optional[str], base_from: Path, base_to: Path) -> Optional[str]:
-    """Replace base_from with base_to inside a path string, or anchor relative paths to base_to."""
+    """Map outputs beneath a result root, preserving explicit external paths."""
     if path is None:
         return None
-    base_from_str = str(base_from)
-    candidate = str(Path(path).expanduser())
-    if base_from_str and base_from_str in candidate:
-        return candidate.replace(base_from_str, str(base_to))
-    p = Path(candidate)
-    if not p.is_absolute():
-        return str(base_to / p)
-    return candidate
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        return str(base_to / candidate)
+    try:
+        candidate.relative_to(base_to)
+        return str(candidate)
+    except ValueError:
+        pass
+    try:
+        relative = candidate.relative_to(base_from)
+    except ValueError:
+        return str(candidate)
+    return str(base_to / relative)
 
 
 @app.post("/api/run/full")
 def run_full(payload: FullPipelineRequest):
     base_results = Path(payload.dd.base_results_dir).expanduser()
+    if not base_results.is_absolute():
+        base_results = MATTERGEN_ROOT / base_results
+    base_results = base_results.resolve()
     batches = max(1, payload.num_batches)
     segments_root = _full_segments_root(base_results)
     run_bases = [_full_segment_dir(base_results, i) for i in range(batches)]
@@ -552,8 +568,8 @@ def run_full(payload: FullPipelineRequest):
         env_prefix = " ".join([f"{k}={_quote(str(v))}" for k, v in dd_env.items()])
 
         script_lines += [
-            f"echo {_quote(f'Generate segment {batch_no}/{batches}: dd.sh -> {run_base}')}",
-            f"{env_prefix} bash {_quote(str(ensure_script('dd.sh')))}",
+            f"echo {_quote(f'Generate segment {batch_no}/{batches}: generate.sh -> {run_base}')}",
+            f"{env_prefix} bash {_quote(str(ensure_script('generate.sh')))}",
         ]
 
     manifest_path = base_results / "full_pipeline_segments.txt"
@@ -569,8 +585,8 @@ def run_full(payload: FullPipelineRequest):
 
     screen = payload.screen
     screen_base = eval_root
-    screen_out = _remap_results_path(screen.out, base_results, base_results) or screen.out
-    screen_refs = _remap_results_path(screen.refs_out, base_results, base_results) or screen.refs_out
+    screen_out = _remap_results_path(screen.out, DEFAULT_RESULTS_ROOT, base_results) or screen.out
+    screen_refs = _remap_results_path(screen.refs_out, DEFAULT_RESULTS_ROOT, base_results) or screen.refs_out
 
     screen_cmd = [
         "python",
@@ -612,31 +628,31 @@ def run_full(payload: FullPipelineRequest):
 
     default_top_out = str(base_results / "top300_run")
     top_output_dir_raw = top.output_dir or default_top_out
-    top_output_dir = _remap_results_path(top_output_dir_raw, base_results, base_results) or top_output_dir_raw
+    top_output_dir = _remap_results_path(top_output_dir_raw, DEFAULT_RESULTS_ROOT, base_results) or top_output_dir_raw
 
     def _anchor_to_output_dir(path_str: str) -> str:
         p = Path(path_str)
         if p.is_absolute():
             return str(p)
-        return str(Path(top_output_dir_raw) / p)
+        return str(Path(top_output_dir) / p)
 
-    default_export_dir = str(Path(top_output_dir_raw) / "exported_300cifs")
+    default_export_dir = "exported_300cifs"
     top_export_dir_raw = _anchor_to_output_dir(top.export_dir or default_export_dir)
-    top_export_dir = _remap_results_path(top_export_dir_raw, base_results, base_results) or top_export_dir_raw
+    top_export_dir = _remap_results_path(top_export_dir_raw, DEFAULT_RESULTS_ROOT, base_results) or top_export_dir_raw
 
     top_refs_out_raw = _anchor_to_output_dir(top.refs_out or "top300_refs.txt")
-    top_refs_out = _remap_results_path(top_refs_out_raw, base_results, base_results) or top_refs_out_raw
+    top_refs_out = _remap_results_path(top_refs_out_raw, DEFAULT_RESULTS_ROOT, base_results) or top_refs_out_raw
 
     top_index_name = top.export_index_name or "export_300index.csv"
 
     top_ehull_out_raw = _anchor_to_output_dir(top.ehull_out or "chgnet_hull_top300.csv")
-    top_ehull_out = _remap_results_path(top_ehull_out_raw, base_results, base_results) or top_ehull_out_raw
+    top_ehull_out = _remap_results_path(top_ehull_out_raw, DEFAULT_RESULTS_ROOT, base_results) or top_ehull_out_raw
 
     top_filtered_out_raw = _anchor_to_output_dir(top.filtered_out or "chgnet_hull_top300_filtered.csv")
-    top_filtered_out = _remap_results_path(top_filtered_out_raw, base_results, base_results) or top_filtered_out_raw
+    top_filtered_out = _remap_results_path(top_filtered_out_raw, DEFAULT_RESULTS_ROOT, base_results) or top_filtered_out_raw
 
     top_voltage_out_raw = _anchor_to_output_dir(top.voltage_out or "chgnet_voltage_window_top300.csv")
-    top_voltage_out = _remap_results_path(top_voltage_out_raw, base_results, base_results) or top_voltage_out_raw
+    top_voltage_out = _remap_results_path(top_voltage_out_raw, DEFAULT_RESULTS_ROOT, base_results) or top_voltage_out_raw
 
     top_cmd = [
         "python",
@@ -680,8 +696,8 @@ def run_full(payload: FullPipelineRequest):
         top_cmd.append("--dry-run")
 
     script_lines += [
-        "echo '==== Unified eval_all.sh over generated segments ===='",
-        f"ROOT={_quote(eval_root)} WORKDIR={_quote(str(MATTERGEN_ROOT))} LOGDIR={_quote(eval_log_dir)} RECURSIVE=1 bash {_quote(str(ensure_script('eval_all.sh')))}",
+        "echo '==== Unified evaluate.sh over generated segments ===='",
+        f"ROOT={_quote(eval_root)} WORKDIR={_quote(str(MATTERGEN_ROOT))} LOGDIR={_quote(eval_log_dir)} RECURSIVE=1 bash {_quote(str(ensure_script('evaluate.sh')))}",
         "echo '==== Unified screen_all_extxyz.py over all relaxed structures ===='",
         " ".join(_quote(x) for x in screen_cmd),
         "echo '==== Global run_top300_pipeline.py from unified stage2 CSV ===='",
@@ -821,7 +837,7 @@ def get_structure_preview(path: str):
 
 @app.get("/api/voltage")
 def get_voltage(path: Optional[str] = None):
-    target = Path(path or (SCRIPTS_DIR.parent / "results" / "chgnet_voltage_window_top300.csv")).resolve()
+    target = Path(path or (DEFAULT_RESULTS_ROOT / "top300_run" / "chgnet_voltage_window_top300.csv")).resolve()
     if not target.exists():
         raise HTTPException(status_code=404, detail="voltage CSV not found")
     import csv

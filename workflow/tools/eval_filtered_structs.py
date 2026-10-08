@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch-evaluate structures listed in chgnet_hull_top300_filtered.csv with mattergen-evaluate.
+Batch-evaluate structures listed in final_candidates.csv with mattergen-evaluate.
 
 For each row in the input CSV, this script runs mattergen-evaluate on the referenced CIF
 and stores the resulting metrics.json / relaxed.extxyz under an output directory dedicated
@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Dict, List
 
 
+DEFAULT_RESULTS = Path(__file__).resolve().parents[2] / "results"
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate each structure from a CHGNet hull CSV using mattergen-evaluate."
@@ -26,19 +28,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path("chgnet_hull_top300_filtered.csv"),
+        default=DEFAULT_RESULTS / "top300_run" / "final_candidates.csv",
         help="Input CSV containing at least 'file' and 'path' columns.",
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("results/mattergen_eval_top300"),
+        default=DEFAULT_RESULTS / "evaluation",
         help="Root directory where per-structure outputs will be written.",
     )
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=Path("logs_eval_top300_metrics"),
+        default=DEFAULT_RESULTS / "evaluation" / "logs",
         help="Directory for per-structure evaluation logs.",
     )
     parser.add_argument(
@@ -61,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--summary-csv",
         type=Path,
-        default=Path("results/mattergen_eval_top300/metrics_summary.csv"),
+        default=None,
         help="CSV file to write aggregated metrics from all metrics.json files.",
     )
     parser.add_argument(
@@ -75,7 +77,10 @@ def parse_args() -> argparse.Namespace:
         help="Skip running mattergen-evaluate and only build the summary CSV "
         "(requires existing metrics.json files).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.summary_csv is None:
+        args.summary_csv = args.out_dir / "metrics_summary.csv"
+    return args
 
 
 def load_rows(csv_path: Path) -> list[dict]:

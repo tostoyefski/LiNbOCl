@@ -82,6 +82,7 @@ async function applyPathDefaults() {
     if (fs) {
       if (defaults.screen_base) fs.base.value = defaults.screen_base;
       if (defaults.screen_out) fs.out.value = defaults.screen_out;
+      if (defaults.screen_refs_out) fs.refs_out.value = defaults.screen_refs_out;
     }
     if (ft) {
       if (defaults.top300_stage2_csv) ft.stage2_csv.value = defaults.top300_stage2_csv;
@@ -117,14 +118,14 @@ function bindForms() {
       elements,
       combo_sizes: comboSizes.length ? comboSizes : [4],
     };
-    await submitJob("dd.sh", `${apiBase}/run/dd`, payload, btn);
+    await submitJob("generate.sh", `${apiBase}/run/dd`, payload, btn);
   });
 
   document.getElementById("form-eval").addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = e.submitter;
     const payload = { root: e.target.root.value };
-    await submitJob("eval_all.sh", `${apiBase}/run/eval`, payload, btn);
+    await submitJob("evaluate.sh", `${apiBase}/run/eval`, payload, btn);
   });
 
   document.getElementById("form-screen").addEventListener("submit", async (e) => {

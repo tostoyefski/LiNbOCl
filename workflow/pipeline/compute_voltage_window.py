@@ -48,6 +48,7 @@ except ImportError:
 
 from pymatgen.core import Element, Structure
 
+DEFAULT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "top300_run"
 DEFAULT_THRESHOLD = 1e-3  # eV/non-working-element atom on the grand hull
 INTERVAL_POLICY = "widest_then_lowest_voltage"
 
@@ -86,7 +87,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stable-csv",
-        default="chgnet_hull_results_stable.csv",
+        default=str(DEFAULT_RESULTS / "chgnet_hull_top300_filtered.csv"),
         help="CSV containing the filtered stable candidates (must include path & energy columns).",
     )
     parser.add_argument(
@@ -137,7 +138,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--out",
-        default="chgnet_voltage_window.csv",
+        default=str(DEFAULT_RESULTS / "chgnet_voltage_window_top300.csv"),
         help="Output CSV file with voltage window metrics.",
     )
     args = parser.parse_args(argv)

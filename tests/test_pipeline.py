@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "mattergen_webapp" / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "workflow" / "pipeline"
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location("top_pipeline", SCRIPTS / "run_top300_pipeline.py")
 pipeline = importlib.util.module_from_spec(spec)
@@ -27,6 +27,12 @@ def test_pipeline_defaults_are_diverse_and_strict(monkeypatch):
     assert args.voltage_threshold == 1e-3
     assert args.selection_mode == "diverse"
     assert args.target_voltage is None
+    results = Path(__file__).resolve().parents[1] / "results"
+    assert args.output_dir == results / "top300_run"
+    assert args.stage2_csv == results / "stage2_candidates.csv"
+    assert args.export_script == SCRIPTS / "export_refs_to_structs.py"
+    assert args.ehull_script == SCRIPTS / "compute_ehull_chgnet.py"
+    assert args.voltage_script == SCRIPTS / "compute_voltage_window.py"
 
 
 def test_old_score_csv_requires_rescreening(tmp_path):

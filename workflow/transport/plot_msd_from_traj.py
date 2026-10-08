@@ -5,6 +5,8 @@ import sys
 from glob import glob
 from pathlib import Path
 
+TRANSPORT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "transport"
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -161,13 +163,13 @@ def main() -> None:
     parser.add_argument(
         "--plot",
         type=Path,
-        default=Path("msd.png"),
+        default=TRANSPORT_RESULTS / "msd.png",
         help="Output plot path.",
     )
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path("msd.csv"),
+        default=TRANSPORT_RESULTS / "msd.csv",
         help="Output CSV path.",
     )
     parser.add_argument(
