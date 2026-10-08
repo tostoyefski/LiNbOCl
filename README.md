@@ -1,6 +1,6 @@
 # LiNbOCl / MatterGen 材料生成项目
 
-本仓库保存本机项目的纯代码快照，包含 `mattergen/` 核心项目和 `mattergen_webapp/` Web 控制台。
+本仓库包含 `mattergen/` 核心项目和 `mattergen_webapp/` Web 控制台。
 核心项目的原始许可证、NOTICE 和说明保存在 `mattergen/` 中。
 ## 下载并运行
 
