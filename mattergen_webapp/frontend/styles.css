@@ -132,11 +132,11 @@ label {
   color: var(--muted);
 }
 
-input, button {
+input, select, button {
   font-family: inherit;
 }
 
-input {
+input, select {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -144,9 +144,11 @@ input {
   color: var(--text);
 }
 
-input:focus {
+input:focus, select:focus {
   outline: 1px solid rgba(118, 224, 194, 0.5);
 }
+
+select option { background: var(--bg); color: var(--text); }
 
 .toggle-row {
   display: flex;

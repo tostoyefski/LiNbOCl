@@ -1,0 +1,20 @@
+name: Screening regression
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  screening:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-screening-test.txt
+      - run: python -m pip install -r requirements-screening-test.txt
+      - run: python -m pytest -q tests/
+      - run: node --check mattergen_webapp/frontend/app.js
+      - run: bash -n mattergen_webapp/scripts/dd.sh mattergen_webapp/scripts/run_full_pipeline_hpc.sh

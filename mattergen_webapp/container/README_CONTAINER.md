@@ -123,6 +123,17 @@ BATCH_SIZE * NUM_BATCHES_PER_SEGMENT * SEGMENTS
 
 例如 `16 * 20 * 10 = 3200` 个结构。
 
+容器 CLI 使用与 HPC 相同的筛选脚本：默认要求 `Li Nb O Cl` 全部存在，并限制为这四种元素；开启化学检查与氧比例过滤，Top-K 前去重后按组成轮流选择。具体规则见 [筛选说明](../README.md#筛选规则与审计)，环境变量见 [HPC 参数表](../hpc/README_HPC.md#7-调整运行规模)。
+
+Compose 当前只自动透传配置中列出的宿主机变量。附加筛选参数请通过 `run -e` 传入，例如要求候选在 4.5 V 稳定且已采样窗口至少 1 V：
+
+```bash
+docker compose --profile cli run --rm \
+  -e TARGET_VOLTAGE=4.5 -e MIN_VOLTAGE_WINDOW=1.0 mattergen-cli
+```
+
+省略 `TARGET_VOLTAGE` 时不附加工作电压条件。先检查去重和 CIF 导出可运行 `docker compose --profile cli run --rm -e DRY_RUN=1 mattergen-cli`；此模式跳过体相和电压计算。
+
 ## 6. 输出目录
 
 容器内：
@@ -130,7 +141,10 @@ BATCH_SIZE * NUM_BATCHES_PER_SEGMENT * SEGMENTS
 ```text
 /runs/results200/_segments/batch001/...
 /runs/results200/stage2_candidates.csv
-/runs/results200/top300_run/
+/runs/results200/screened_out.csv
+/runs/results200/top300_run/selection_audit.csv
+/runs/results200/top300_run/voltage_filter_audit.csv
+/runs/results200/top300_run/final_candidates.csv
 ```
 
 宿主机：
@@ -140,6 +154,8 @@ BATCH_SIZE * NUM_BATCHES_PER_SEGMENT * SEGMENTS
 /data/mattergen_runs/results200/stage2_candidates.csv
 /data/mattergen_runs/results200/top300_run/
 ```
+
+`final_candidates.csv` 包含通过体相和电压筛选的候选。电压容差默认 0.001 eV/non-Li atom；失败、无窗口或未满足额外电压条件的候选保留在审计中。历史 stage2 CSV 需从已有 `relaxed.extxyz` 重新筛选，生成新的 `score_kind=li_periodic_geometry_proxy_v1` 后再运行 Top-K。
 
 缓存和临时文件都在：
 
@@ -169,5 +185,5 @@ mattergen-evaluate --help
 
 - 4090 显存 24GB，`BATCH_SIZE=16` 通常比 1650 稳很多；如果仍 OOM，改成 `BATCH_SIZE=8`。
 - 如果不想联网下载模型，确认 `/data/mattergen_runs/_runtime/huggingface` 已经有本机迁移过去的缓存。
-- 如果 CHGNet / MP 阶段失败，先用 `DRY_RUN=1` 跑导出链路，再检查 `MP_API_KEY` 和容器网络。
+- 如果 CHGNet / MP 阶段失败，先用 `docker compose --profile cli run --rm -e DRY_RUN=1 mattergen-cli` 跑导出链路，再检查 `MP_API_KEY` 和容器网络。
 - 如果网页里仍显示 `/mnt/e/...`，这是本机 WSL 路径；容器内要统一改成 `/runs/...`。

@@ -5,9 +5,10 @@ The workflow consumes a CSV (e.g. ``chgnet_hull_results_stable.csv``) and, for e
 entry, assembles the relevant competing phases in the same chemical system. All
 energies are (re-)evaluated on a consistent CHGNet baseline so that formation
 energies and grand-potential hulls can be compared fairly. A voltage grid is then
-scanned to determine the first oxidation (V_ox) and reduction (V_red) limits where
-the candidate becomes unstable, and the resulting electrochemical window width is
-reported.
+scanned to report contiguous intervals of stable sampled voltages. V_red and V_ox
+are the first and last stable grid points in the widest interval, with brackets
+and censor flags describing what the scan can establish about phase boundaries.
+An optional target voltage is evaluated directly, independently of grid spacing.
 
 Assumptions:
     * A Materials Project API key is available via ``MP_API_KEY`` or
@@ -30,15 +31,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from chgnet.model import CHGNet
-from mp_api.client import MPRester
 from pymatgen.analysis.phase_diagram import GrandPotentialPhaseDiagram, PDEntry
 
 try:  # compat across pymatgen versions
@@ -48,10 +48,8 @@ except ImportError:
 
 from pymatgen.core import Element, Structure
 
-from compute_ehull_chgnet import fetch_mp_competitor_structures, structures_to_entries
-
-
-DEFAULT_THRESHOLD = 1e-3  # eV/atom stability tolerance when evaluating grand hulls
+DEFAULT_THRESHOLD = 1e-3  # eV/non-working-element atom on the grand hull
+INTERVAL_POLICY = "widest_then_lowest_voltage"
 
 
 def make_grand_entry(entry: PDEntry, chempots: Dict[Element, float]):
@@ -61,7 +59,28 @@ def make_grand_entry(entry: PDEntry, chempots: Dict[Element, float]):
     return _GrandPotentialPDEntry(entry, chempots)
 
 
-def parse_args() -> argparse.Namespace:
+def finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError("must be finite")
+    return number
+
+
+def nonnegative_finite_float(value: str) -> float:
+    number = finite_float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return number
+
+
+def positive_finite_float(value: str) -> float:
+    number = finite_float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compute oxidation/reduction voltage limits for CHGNet candidates."
     )
@@ -82,27 +101,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voltage-min",
-        type=float,
+        type=finite_float,
         default=0.0,
         help="Lower bound of the voltage grid (V).",
     )
     parser.add_argument(
         "--voltage-max",
-        type=float,
+        type=finite_float,
         default=6.0,
         help="Upper bound of the voltage grid (V).",
     )
     parser.add_argument(
         "--voltage-step",
-        type=float,
+        type=positive_finite_float,
         default=0.05,
         help="Voltage increment for scanning the electrochemical window (V).",
     )
     parser.add_argument(
         "--threshold",
-        type=float,
+        type=nonnegative_finite_float,
         default=DEFAULT_THRESHOLD,
-        help="Energy-above-hull tolerance (eV/atom) for declaring instability on the grand potential hull.",
+        help="Stability tolerance in eV/non-working-element atom (default: 0.001).",
+    )
+    parser.add_argument(
+        "--target-voltage",
+        type=finite_float,
+        default=None,
+        help="Optional voltage (V) to evaluate directly against the grand hull.",
     )
     parser.add_argument(
         "--max-mp-competitors",
@@ -115,7 +140,10 @@ def parse_args() -> argparse.Namespace:
         default="chgnet_voltage_window.csv",
         help="Output CSV file with voltage window metrics.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.voltage_max <= args.voltage_min:
+        parser.error("--voltage-max must exceed --voltage-min")
+    return args
 
 
 def load_stable_rows(csv_path: Path) -> List[Dict[str, str]]:
@@ -132,6 +160,8 @@ def load_stable_rows(csv_path: Path) -> List[Dict[str, str]]:
 
 
 def generate_voltage_grid(vmin: float, vmax: float, step: float) -> List[float]:
+    if not all(math.isfinite(value) for value in (vmin, vmax, step)):
+        raise ValueError("voltage bounds and step must be finite")
     if step <= 0:
         raise ValueError("voltage-step must be positive")
     if vmax <= vmin:
@@ -150,22 +180,36 @@ class Candidate:
     entry: PDEntry
 
 
-def build_candidates(rows: Sequence[Dict[str, str]]) -> List[Candidate]:
+def build_candidates(
+    rows: Sequence[Dict[str, str]],
+    failures: Optional[List[Tuple[Dict[str, str], str]]] = None,
+) -> List[Candidate]:
     candidates: List[Candidate] = []
     for row in rows:
         cif_path = Path(row["path"]).expanduser()
         if not cif_path.exists():
-            print(f"[WARN] CIF path missing for {row.get('file', cif_path.name)}: {cif_path}")
+            error = f"CIF path missing: {cif_path}"
+            print(f"[WARN] {error}")
+            if failures is not None:
+                failures.append((row, error))
             continue
         try:
             structure = Structure.from_file(cif_path)
         except Exception as exc:
-            print(f"[WARN] Failed to load structure {cif_path}: {exc}")
+            error = f"Failed to load structure {cif_path}: {exc}"
+            print(f"[WARN] {error}")
+            if failures is not None:
+                failures.append((row, error))
             continue
         try:
             energy_total = float(row["energy_total_eV"])
+            if not math.isfinite(energy_total):
+                raise ValueError("energy_total_eV must be finite")
         except (TypeError, ValueError):
-            print(f"[WARN] Invalid energy_total_eV for {cif_path}, skipping candidate.")
+            error = f"Invalid or non-finite energy_total_eV for {cif_path}"
+            print(f"[WARN] {error}")
+            if failures is not None:
+                failures.append((row, error))
             continue
         entry = PDEntry(structure.composition, energy_total)
         candidates.append(Candidate(row=row, structure=structure, entry=entry))
@@ -183,6 +227,105 @@ def locate_reference_mu(entries: Iterable[PDEntry], element: Element) -> Optiona
     return mu
 
 
+@dataclass
+class VoltageWindowResult:
+    """Grid bounds are conservative samples, not exact thermodynamic boundaries.
+
+    Iteration preserves the former three-value unpacking API. Additional fields
+    distinguish scan censoring, absent stable intervals and calculation errors.
+    """
+
+    V_red: Optional[float] = None
+    V_ox: Optional[float] = None
+    window: Optional[float] = None
+    window_status: str = "no_stable_window"
+    stable_intervals: List[Dict[str, object]] = field(default_factory=list)
+    lower_boundary_bracket: Optional[Tuple[float, float]] = None
+    upper_boundary_bracket: Optional[Tuple[float, float]] = None
+    lower_bound_censored: Optional[bool] = None
+    upper_bound_censored: Optional[bool] = None
+    target_voltage: Optional[float] = None
+    stable_at_target: Optional[bool] = None
+    target_e_above_hull_eV: Optional[float] = None
+    energy_tolerance_eV: float = DEFAULT_THRESHOLD
+    e_above_hull_unit: str = "eV/non-Li atom"
+    interval_policy: str = INTERVAL_POLICY
+    error: Optional[str] = None
+
+    def __iter__(self) -> Iterator[Optional[float]]:
+        return iter((self.V_red, self.V_ox, self.window))
+
+    def as_record(self) -> Dict[str, object]:
+        record = dict(vars(self))
+        record["stable_intervals_json"] = json.dumps(record.pop("stable_intervals"))
+        for name in ("lower_boundary_bracket", "upper_boundary_bracket"):
+            if record[name] is not None:
+                record[name] = json.dumps(record[name])
+        return record
+
+
+def stable_intervals_from_grid(
+    voltages: Sequence[float], stability: Sequence[bool]
+) -> List[Dict[str, object]]:
+    """Keep disjoint stable runs separate; each boundary uses adjacent samples."""
+    intervals: List[Dict[str, object]] = []
+    index = 0
+    while index < len(voltages):
+        if not stability[index]:
+            index += 1
+            continue
+        first = index
+        while index + 1 < len(voltages) and stability[index + 1]:
+            index += 1
+        last = index
+        intervals.append(
+            {
+                "V_red": voltages[first],
+                "V_ox": voltages[last],
+                "window": voltages[last] - voltages[first],
+                "lower_boundary_bracket": (
+                    None if first == 0 else (voltages[first - 1], voltages[first])
+                ),
+                "upper_boundary_bracket": (
+                    None if last == len(voltages) - 1 else (voltages[last], voltages[last + 1])
+                ),
+                "lower_bound_censored": first == 0,
+                "upper_bound_censored": last == len(voltages) - 1,
+            }
+        )
+        index += 1
+    return intervals
+
+
+def evaluate_voltage_point(
+    base_entries: Sequence[PDEntry],
+    candidate_index: int,
+    work_element: Element,
+    mu_ref: float,
+    voltage: float,
+) -> float:
+    """Evaluate ΔE_hull in eV per atom remaining after removing the open ion.
+
+    Original total-energy entries go into GPPD. Both it and the candidate's grand
+    entry apply μ(V) = μ_ref - V exactly once; no formation-energy rebasing occurs.
+    """
+    mu = mu_ref - voltage
+    if not math.isfinite(mu):
+        raise ValueError("non-finite working-element chemical potential")
+    for index, entry in enumerate(base_entries):
+        if not math.isfinite(entry.energy):
+            # Pymatgen may silently discard non-finite competing phases when
+            # selecting its hull facets, which would fabricate stability.
+            raise ValueError(f"non-finite total energy in phase entry {index}")
+    chempots = {work_element: mu}
+    diagram = GrandPotentialPhaseDiagram(base_entries, chempots)
+    gp_entry = make_grand_entry(base_entries[candidate_index], chempots)
+    e_above = float(diagram.get_e_above_hull(gp_entry))
+    if not math.isfinite(e_above):
+        raise ValueError("non-finite energy above grand-potential hull")
+    return e_above
+
+
 def evaluate_voltage_window(
     candidate: Candidate,
     base_entries: Sequence[PDEntry],
@@ -190,55 +333,65 @@ def evaluate_voltage_window(
     work_element: Element,
     mu_ref: float,
     voltages: Sequence[float],
-    energy_tol: float,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    energy_tol: float = DEFAULT_THRESHOLD,
+    target_voltage: Optional[float] = None,
+) -> VoltageWindowResult:
+    if not math.isfinite(energy_tol) or energy_tol < 0:
+        raise ValueError("energy tolerance must be finite and non-negative")
+    if not math.isfinite(mu_ref):
+        raise ValueError("reference chemical potential must be finite")
+    voltages = list(voltages)
+    if not voltages or not all(math.isfinite(value) for value in voltages):
+        raise ValueError("voltage grid must be nonempty and finite")
+    if any(right <= left for left, right in zip(voltages, voltages[1:])):
+        raise ValueError("voltage grid must be strictly increasing")
+    if target_voltage is not None and not math.isfinite(target_voltage):
+        raise ValueError("target voltage must be finite")
+    if not 0 <= candidate_index < len(base_entries):
+        raise ValueError("candidate index is outside the entry list")
+
+    result = VoltageWindowResult(
+        target_voltage=target_voltage,
+        energy_tolerance_eV=energy_tol,
+        e_above_hull_unit=f"eV/non-{work_element.symbol} atom",
+    )
     stability: List[bool] = []
-
-    for V in voltages:
-        mu = mu_ref - V  # μ(V) = μ_ref - eV (with e = 1 in eV units)
-        chempots = {work_element: mu}
-        gp_entries = [make_grand_entry(entry, chempots) for entry in base_entries]
+    for voltage in voltages:
         try:
-            gppd = GrandPotentialPhaseDiagram(gp_entries, chempots)
-        except Exception as exc:
-            print(
-                f"[WARN] Failed to build grand potential diagram for {candidate.row.get('file')} "
-                f"at {V:.3f} V: {exc}"
+            e_above = evaluate_voltage_point(
+                base_entries, candidate_index, work_element, mu_ref, voltage
             )
-            stability.append(False)
-            continue
-
-        gp_entry = gp_entries[candidate_index]
-        try:
-            e_above = float(gppd.get_e_above_hull(gp_entry))
         except Exception as exc:
-            print(
-                f"[WARN] Could not evaluate ΔE_hull for {candidate.row.get('file')} at {V:.3f} V: {exc}"
-            )
-            stability.append(False)
-            continue
+            result.window_status = "calculation_failed"
+            result.error = f"Grand-potential calculation at {voltage:g} V failed: {exc}"
+            return result
         stability.append(e_above <= energy_tol)
 
-    V_red: Optional[float] = None
-    V_ox: Optional[float] = None
+    if target_voltage is not None:
+        try:
+            result.target_e_above_hull_eV = evaluate_voltage_point(
+                base_entries, candidate_index, work_element, mu_ref, target_voltage
+            )
+        except Exception as exc:
+            result.window_status = "calculation_failed"
+            result.error = f"Target-voltage calculation at {target_voltage:g} V failed: {exc}"
+            return result
+        result.stable_at_target = result.target_e_above_hull_eV <= energy_tol
 
-    # Oxidation limit: sweep to higher potentials
-    for i in range(1, len(voltages)):
-        if stability[i - 1] and not stability[i]:
-            V_ox = voltages[i]
-            break
-
-    # Reduction limit: sweep downwards from high to low
-    for i in range(len(voltages) - 1, 0, -1):
-        if stability[i] and not stability[i - 1]:
-            V_red = voltages[i]
-            break
-
-    window = None
-    if V_red is not None and V_ox is not None:
-        window = max(0.0, V_ox - V_red)
-
-    return V_red, V_ox, window
+    result.stable_intervals = stable_intervals_from_grid(voltages, stability)
+    if result.stable_intervals:
+        primary = min(
+            result.stable_intervals,
+            key=lambda interval: (-interval["window"], interval["V_red"]),
+        )
+        for name, value in primary.items():
+            setattr(result, name, value)
+        result.window_status = (
+            "scan_censored"
+            if result.lower_bound_censored or result.upper_bound_censored
+            else "stable_window"
+        )
+    return result
 
 
 def main() -> None:
@@ -246,6 +399,13 @@ def main() -> None:
 
     if not args.mp_api_key:
         raise SystemExit("MP API key not provided. Use --mp-api-key or set MP_API_KEY.")
+
+    # Keep pure phase-diagram helpers importable without torch, CHGNet or an API
+    # client. These are needed only for the model/MP command-line workflow.
+    from chgnet.model import CHGNet
+    from mp_api.client import MPRester
+
+    from compute_ehull_chgnet import fetch_mp_competitor_structures, structures_to_entries
 
     stable_csv = Path(args.stable_csv).expanduser()
     rows = load_stable_rows(stable_csv)
@@ -260,45 +420,71 @@ def main() -> None:
     model = CHGNet.load()
     print("[INFO] CHGNet model loaded for voltage window analysis.")
 
-    results: List[Dict[str, Optional[float]]] = []
+    results: List[Dict[str, object]] = []
 
-    with MPRester(args.mp_api_key) as mpr:
+    def add_record(row: Dict[str, str], result: VoltageWindowResult) -> None:
+        record = {key: row.get(key) for key in ("file", "path", "formula", "chemsys")}
+        record.update(result.as_record())
+        results.append(record)
+
+    def record_failure(row: Dict[str, str], error: str) -> None:
+        print(f"[WARN] {row.get('file', row.get('path'))}: {error}")
+        add_record(
+            row,
+            VoltageWindowResult(
+                window_status="calculation_failed",
+                target_voltage=args.target_voltage,
+                energy_tolerance_eV=args.threshold,
+                e_above_hull_unit=f"eV/non-{work_element.symbol} atom",
+                error=error,
+            ),
+        )
+
+    # Keep MP responses as dicts to avoid older local document-model validation
+    # rejecting newer alphanumeric Materials Project ids.
+    with MPRester(args.mp_api_key, use_document_model=False) as mpr:
         for chemsys, chemsys_rows in grouped_rows.items():
             print(f"[INFO] Processing chemical system {chemsys} ({len(chemsys_rows)} candidates)")
-            candidates = build_candidates(chemsys_rows)
+            build_failures: List[Tuple[Dict[str, str], str]] = []
+            candidates = build_candidates(chemsys_rows, build_failures)
+            for row, error in build_failures:
+                record_failure(row, error)
             if not candidates:
                 print(f"[WARN] No valid candidates found for {chemsys}, skipping.")
                 continue
 
-            comp_structs = fetch_mp_competitor_structures(
-                chemsys, mpr, args.max_mp_competitors
-            )
-            if not comp_structs:
-                print(f"[WARN] Failed to obtain MP competitor structures for {chemsys}, skipping.")
-                continue
-
-            comp_entries = structures_to_entries(comp_structs, model)
-            if not comp_entries:
-                print(f"[WARN] Competitor entries empty for {chemsys}, skipping.")
-                continue
-
-            mu_ref = locate_reference_mu(comp_entries, work_element)
-            if mu_ref is None:
-                print(
-                    f"[WARN] No unary reference for {work_element} in {chemsys}; cannot determine μ_ref."
+            try:
+                comp_structs = fetch_mp_competitor_structures(
+                    chemsys, mpr, args.max_mp_competitors
                 )
+                if not comp_structs:
+                    raise ValueError(f"No MP competitor structures obtained for {chemsys}")
+                comp_entries = structures_to_entries(comp_structs, model)
+                if not comp_entries:
+                    raise ValueError(f"Competitor entries empty for {chemsys}")
+                if len(comp_entries) != len(comp_structs):
+                    raise ValueError(
+                        "Incomplete competing-phase energies: "
+                        f"evaluated {len(comp_entries)} of {len(comp_structs)} structures"
+                    )
+                mu_ref = locate_reference_mu(comp_entries, work_element)
+                if mu_ref is None or not math.isfinite(mu_ref):
+                    raise ValueError(f"No finite unary reference for {work_element} in {chemsys}")
+            except Exception as exc:
+                for cand in candidates:
+                    record_failure(cand.row, f"Competing-phase preparation failed: {exc}")
                 continue
 
             base_entries = comp_entries + [cand.entry for cand in candidates]
 
             for local_idx, cand in enumerate(candidates):
                 if work_element not in {el for el in cand.entry.composition.elements}:
-                    print(
-                        f"[WARN] Working element {work_element} absent in {cand.row.get('file')}, skipping candidate."
+                    record_failure(
+                        cand.row, f"Working element {work_element} absent in candidate"
                     )
                     continue
 
-                V_red, V_ox, window = evaluate_voltage_window(
+                result = evaluate_voltage_window(
                     candidate=cand,
                     base_entries=base_entries,
                     candidate_index=len(comp_entries) + local_idx,
@@ -306,17 +492,11 @@ def main() -> None:
                     mu_ref=mu_ref,
                     voltages=voltages,
                     energy_tol=args.threshold,
+                    target_voltage=args.target_voltage,
                 )
-
-                record: Dict[str, Optional[float]] = {
-                    "file": cand.row.get("file"),
-                    "formula": cand.row.get("formula"),
-                    "chemsys": chemsys,
-                    "V_red": V_red,
-                    "V_ox": V_ox,
-                    "window": window,
-                }
-                results.append(record)
+                if result.error:
+                    print(f"[WARN] {cand.row.get('file')}: {result.error}")
+                add_record(cand.row, result)
 
     if not results:
         raise SystemExit("Voltage window analysis produced no results. Inspect warnings above.")
@@ -324,7 +504,7 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = ["file", "formula", "chemsys", "V_red", "V_ox", "window"]
+    fieldnames = ["file", "path", "formula", "chemsys", *VoltageWindowResult().as_record()]
     with out_path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
