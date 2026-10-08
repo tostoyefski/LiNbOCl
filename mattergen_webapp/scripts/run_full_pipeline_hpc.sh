@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Command-line full pipeline for HPC schedulers.
+# It mirrors the webapp "one-click full pipeline":
+# segmented generation first, then unified eval/screen/top-K export.
+
+set -euo pipefail
+
+WEBAPP_ROOT="${WEBAPP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MATTERGEN_ROOT="${MATTERGEN_ROOT:-$(cd "$WEBAPP_ROOT/../mattergen" && pwd)}"
+RESULTS_ROOT="${RESULTS_ROOT:-$MATTERGEN_ROOT/results_hpc}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-$RESULTS_ROOT/_runtime}"
+
+MODEL_NAME="${MODEL_NAME:-chemical_system_energy_above_hull}"
+CHEMICAL_SYSTEMS="${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}"
+CHEMICAL_SYSTEMS_FILE="${CHEMICAL_SYSTEMS_FILE:-}"
+ELEMENTS="${ELEMENTS:-}"
+COMBO_SIZES="${COMBO_SIZES:-3}"
+
+BATCH_SIZE="${BATCH_SIZE:-16}"
+NUM_BATCHES_PER_SEGMENT="${NUM_BATCHES_PER_SEGMENT:-20}"
+SEGMENTS="${SEGMENTS:-10}"
+E_AH="${E_AH:-0.05}"
+GUIDANCE="${GUIDANCE:-2.0}"
+
+SCREEN_TOPK="${SCREEN_TOPK:-300}"
+TOPK="${TOPK:-300}"
+R_CUT="${R_CUT:-3.0}"
+SUPERCELL="${SUPERCELL:-2 2 2}"
+LIGHT_OXY="${LIGHT_OXY:-0.05 0.35}"
+REQUIRE_CHARGE_BALANCE="${REQUIRE_CHARGE_BALANCE:-1}"
+USE_SMACT="${USE_SMACT:-1}"
+DRY_RUN="${DRY_RUN:-0}"
+
+export TMPDIR="$RUNTIME_ROOT/tmp"
+export TMP="$RUNTIME_ROOT/tmp"
+export TEMP="$RUNTIME_ROOT/tmp"
+export XDG_CACHE_HOME="$RUNTIME_ROOT/cache"
+export HF_HOME="$RUNTIME_ROOT/huggingface"
+export HF_HUB_CACHE="$RUNTIME_ROOT/huggingface/hub"
+export TRANSFORMERS_CACHE="$RUNTIME_ROOT/huggingface/transformers"
+export TORCH_HOME="$RUNTIME_ROOT/torch"
+export CUDA_CACHE_PATH="$RUNTIME_ROOT/cuda"
+export MPLCONFIGDIR="$RUNTIME_ROOT/matplotlib"
+export UV_CACHE_DIR="$RUNTIME_ROOT/uv"
+export PIP_CACHE_DIR="$RUNTIME_ROOT/pip"
+export NUMBA_CACHE_DIR="$RUNTIME_ROOT/numba"
+export TRITON_CACHE_DIR="$RUNTIME_ROOT/triton"
+export PYTHONPYCACHEPREFIX="$RUNTIME_ROOT/pycache"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$TORCH_HOME" "$CUDA_CACHE_PATH" \
+  "$MPLCONFIGDIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$NUMBA_CACHE_DIR" "$TRITON_CACHE_DIR" \
+  "$PYTHONPYCACHEPREFIX" "$RESULTS_ROOT"
+
+cd "$MATTERGEN_ROOT"
+
+echo "[info] MATTERGEN_ROOT=$MATTERGEN_ROOT"
+echo "[info] WEBAPP_ROOT=$WEBAPP_ROOT"
+echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
+echo "[info] RUNTIME_ROOT=$RUNTIME_ROOT"
+echo "[info] SEGMENTS=$SEGMENTS NUM_BATCHES_PER_SEGMENT=$NUM_BATCHES_PER_SEGMENT BATCH_SIZE=$BATCH_SIZE"
+
+SEGMENTS_ROOT="$RESULTS_ROOT/_segments"
+MANIFEST="$RESULTS_ROOT/full_pipeline_segments.txt"
+: > "$MANIFEST"
+
+for i in $(seq 1 "$SEGMENTS"); do
+  seg_name=$(printf "batch%03d" "$i")
+  seg_dir="$SEGMENTS_ROOT/$seg_name"
+  echo "==== Generate segment $i/$SEGMENTS -> $seg_dir ===="
+  printf '%s\n' "$seg_dir" >> "$MANIFEST"
+  MODEL_NAME="$MODEL_NAME" \
+    BASE_RESULTS_DIR="$seg_dir" \
+    BATCH_SIZE="$BATCH_SIZE" \
+    NUM_BATCHES="$NUM_BATCHES_PER_SEGMENT" \
+    E_AH="$E_AH" \
+    GUIDANCE="$GUIDANCE" \
+    CHEMICAL_SYSTEMS="$CHEMICAL_SYSTEMS" \
+    CHEMICAL_SYSTEMS_FILE="$CHEMICAL_SYSTEMS_FILE" \
+    ELEMENTS="$ELEMENTS" \
+    COMBO_SIZES="$COMBO_SIZES" \
+    WORKDIR="$MATTERGEN_ROOT" \
+    bash "$WEBAPP_ROOT/scripts/dd.sh"
+done
+
+echo "==== Unified eval_all.sh over generated segments ===="
+ROOT="$SEGMENTS_ROOT" \
+  WORKDIR="$MATTERGEN_ROOT" \
+  LOGDIR="$RESULTS_ROOT/logs_eval" \
+  RECURSIVE=1 \
+  bash "$WEBAPP_ROOT/scripts/eval_all.sh"
+
+screen_cmd=(
+  python "$WEBAPP_ROOT/scripts/screen_all_extxyz.py"
+  --workdir "$MATTERGEN_ROOT"
+  --base "$SEGMENTS_ROOT"
+  --out "$RESULTS_ROOT/stage2_candidates.csv"
+  --r-cut "$R_CUT"
+  --super $SUPERCELL
+  --light-oxy $LIGHT_OXY
+  --topk "$SCREEN_TOPK"
+  --refs-out "$RESULTS_ROOT/top300_refs.txt"
+)
+if [[ "$REQUIRE_CHARGE_BALANCE" == "1" || "$REQUIRE_CHARGE_BALANCE" == "true" ]]; then
+  screen_cmd+=(--require-charge-balance)
+fi
+if [[ "$USE_SMACT" == "1" || "$USE_SMACT" == "true" ]]; then
+  screen_cmd+=(--use-smact)
+fi
+
+echo "==== Unified screen_all_extxyz.py ===="
+"${screen_cmd[@]}"
+
+top_cmd=(
+  python "$WEBAPP_ROOT/scripts/run_top300_pipeline.py"
+  --workdir "$MATTERGEN_ROOT"
+  --output-dir "$RESULTS_ROOT/top300_run"
+  --stage2-csv "$RESULTS_ROOT/stage2_candidates.csv"
+  --topk "$TOPK"
+  --refs-out "$RESULTS_ROOT/top300_run/top300_refs.txt"
+  --export-dir "$RESULTS_ROOT/top300_run/exported_300cifs"
+  --export-prefix cand300
+  --export-index-name export_300index.csv
+  --ehull-threshold 0.05
+  --ehull-out "$RESULTS_ROOT/top300_run/chgnet_hull_top300.csv"
+  --filtered-out "$RESULTS_ROOT/top300_run/chgnet_hull_top300_filtered.csv"
+  --voltage-out "$RESULTS_ROOT/top300_run/chgnet_voltage_window_top300.csv"
+  --voltage-threshold 0.05
+)
+if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
+  top_cmd+=(--dry-run)
+fi
+
+echo "==== Global run_top300_pipeline.py ===="
+"${top_cmd[@]}"
+
+echo "[done] Full HPC pipeline finished: $RESULTS_ROOT"

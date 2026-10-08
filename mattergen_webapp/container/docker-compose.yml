@@ -1,0 +1,59 @@
+services:
+  mattergen-web:
+    image: mattergen-webapp:cu118
+    build:
+      context: ../../.mattergen_docker_context
+      dockerfile: mattergen_webapp/container/Dockerfile
+    ports:
+      - "8000:8000"
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      MATTERGEN_ROOT: /workspace/mattergen
+      WEBAPP_ROOT: /workspace/mattergen_webapp
+      MATTERGEN_RUNTIME_ROOT: /runs/_runtime
+      RESULTS_ROOT: /runs/results200
+      RUNTIME_ROOT: /runs/_runtime
+      MP_API_KEY: ${MP_API_KEY}
+      TMPDIR: /runs/_runtime/tmp
+      TMP: /runs/_runtime/tmp
+      TEMP: /runs/_runtime/tmp
+      XDG_CACHE_HOME: /runs/_runtime/cache
+      HF_HOME: /runs/_runtime/huggingface
+      HF_HUB_CACHE: /runs/_runtime/huggingface/hub
+      TRANSFORMERS_CACHE: /runs/_runtime/huggingface/transformers
+      TORCH_HOME: /runs/_runtime/torch
+      CUDA_CACHE_PATH: /runs/_runtime/cuda
+      MPLCONFIGDIR: /runs/_runtime/matplotlib
+      UV_CACHE_DIR: /runs/_runtime/uv
+      PIP_CACHE_DIR: /runs/_runtime/pip
+      NUMBA_CACHE_DIR: /runs/_runtime/numba
+      TRITON_CACHE_DIR: /runs/_runtime/triton
+      PYTHONPYCACHEPREFIX: /runs/_runtime/pycache
+    volumes:
+      - ${MATTERGEN_RUNS_DIR:-/data/mattergen_runs}:/runs
+    command: ["uvicorn", "main:app", "--app-dir", "backend", "--host", "0.0.0.0", "--port", "8000"]
+
+  mattergen-cli:
+    image: mattergen-webapp:cu118
+    profiles: ["cli"]
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      MATTERGEN_ROOT: /workspace/mattergen
+      WEBAPP_ROOT: /workspace/mattergen_webapp
+      MATTERGEN_RUNTIME_ROOT: /runs/_runtime
+      RESULTS_ROOT: /runs/results200
+      RUNTIME_ROOT: /runs/_runtime
+      MP_API_KEY: ${MP_API_KEY}
+      CHEMICAL_SYSTEMS: ${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}
+      BATCH_SIZE: ${BATCH_SIZE:-16}
+      NUM_BATCHES_PER_SEGMENT: ${NUM_BATCHES_PER_SEGMENT:-20}
+      SEGMENTS: ${SEGMENTS:-10}
+      SCREEN_TOPK: ${SCREEN_TOPK:-300}
+      TOPK: ${TOPK:-300}
+    volumes:
+      - ${MATTERGEN_RUNS_DIR:-/data/mattergen_runs}:/runs
+    command: ["bash", "/workspace/mattergen_webapp/scripts/run_full_pipeline_container.sh"]

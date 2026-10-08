@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MatterGen 逆向设计工作台</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="libs/3Dmol.js"></script>
+</head>
+<body>
+  <div class="bg-gradients"></div>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">材料逆向设计 · MatterGen</p>
+      <h1>从生成到筛选，一站式管线</h1>
+      <p class="lede">封装 dd.sh / eval_all.sh / screen_all_extxyz.py / run_top300_pipeline.py，提供参数化运行、作业状态与日志查看。默认指向本地 <code>mattergen</code> 仓库。</p>
+      <div class="badges" id="health-badge"></div>
+    </div>
+    <div class="hero-card">
+      <p>典型流程</p>
+      <ol>
+        <li>批量生成：设置模型名/引导参数，跑 dd.sh</li>
+        <li>评估与松弛：eval_all.sh</li>
+        <li>快筛 Li 连通性：screen_all_extxyz.py</li>
+        <li>Top-K 导出 & 电压窗口：run_top300_pipeline.py</li>
+      </ol>
+      <p class="hint">所有作业后台异步执行，可随时刷新状态或查看尾部日志。</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">生成</p>
+            <h2>dd.sh 参数（可自定义元素）</h2>
+          </div>
+          <span class="chip">批量条件生成</span>
+        </div>
+        <form id="form-dd" class="form-grid">
+          <label>MODEL_NAME<input name="model_name" value="chemical_system_energy_above_hull" required></label>
+          <label>BASE_RESULTS_DIR<input name="base_results_dir" value="/mnt/e/mattergen_runs/results200" required></label>
+          <label>BATCH_SIZE<input name="batch_size" type="number" value="16" min="1"></label>
+          <label>NUM_BATCHES（连续采样批次数）<input name="num_batches" type="number" value="1" min="1"></label>
+          <label>E_AH (能量余度)<input name="e_ah" type="number" step="0.01" value="0.05"></label>
+          <label>GUIDANCE (扩散引导)<input name="guidance" type="number" step="0.1" value="2.0"></label>
+          <label>CHEMICAL_SYSTEMS（优先使用，逗号或空格分隔）<input name="chemical_systems" placeholder="Li-Fe-O, Li-Zr-Cl-Br"></label>
+          <label>CHEMICAL_SYSTEMS_FILE（可选，路径）<input name="chemical_systems_file" placeholder="/path/to/systems.txt"></label>
+          <label>ELEMENTS（用于自动组合，空格/逗号分隔）<input name="elements" value="Li Y Cl Br O"></label>
+          <label>COMBO_SIZES（组合大小，空格分隔）<input name="combo_sizes" value="3"></label>
+          <button type="submit">运行 dd.sh</button>
+          <p class="small-hint">若未指定 CHEMICAL_SYSTEMS，会用 ELEMENTS 按 COMBO_SIZES 自动生成组合；NUM_BATCHES 控制 mattergen-generate 连续采样批次数；输出位于 <code>BASE_RESULTS_DIR/化学系统</code>。</p>
+        </form>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">评估</p>
+            <h2>eval_all.sh</h2>
+          </div>
+          <span class="chip">结构松弛 & 指标</span>
+        </div>
+        <form id="form-eval" class="form-grid">
+          <label>ROOT（结果根目录）<input name="root" value="/mnt/e/mattergen_runs/results200" required></label>
+          <button type="submit">运行 eval_all.sh</button>
+          <p class="small-hint">会对 ROOT 下每个子目录执行 mattergen-evaluate，输出 relaxed.extxyz 与 metrics.json。</p>
+        </form>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">快筛</p>
+            <h2>screen_all_extxyz.py</h2>
+          </div>
+          <span class="chip accent">Li 连通 + 组成</span>
+        </div>
+        <form id="form-screen" class="form-grid">
+          <label>base<input name="base" value="/mnt/e/mattergen_runs/results200"></label>
+          <label>out (CSV)<input name="out" value="/mnt/e/mattergen_runs/results200/stage2_candidates.csv"></label>
+          <label>r_cut (Å)<input name="r_cut" type="number" step="0.1" value="3.0"></label>
+          <label>supercell 3 元（空格分隔）<input name="supercell" value="2 2 2"></label>
+          <label>light_oxy 区间<input name="light_oxy" value="0.05 0.35"></label>
+          <label>topk（导出引用数量）<input name="topk" type="number" value="150"></label>
+          <label>refs_out<input name="refs_out" value="top150_refs.txt"></label>
+          <div class="toggle-row">
+            <label><input type="checkbox" name="require_charge_balance"> 电中性筛</label>
+            <label><input type="checkbox" name="use_smact"> 启用 SMACT</label>
+          </div>
+          <button type="submit">运行 screen_all_extxyz.py</button>
+          <p class="small-hint">完成后会生成 stage2_candidates.csv / top150_refs.txt，并按 quick_score 排序。</p>
+        </form>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">精选导出</p>
+            <h2>run_top300_pipeline.py</h2>
+          </div>
+          <span class="chip">Top-K & 电压窗口</span>
+        </div>
+        <form id="form-top300" class="form-grid">
+          <label>stage2_csv<input name="stage2_csv" value="/mnt/e/mattergen_runs/results200/stage2_candidates.csv"></label>
+          <label>output_dir（统一输出）<input name="output_dir" value="/mnt/e/mattergen_runs/results200/top300_run"></label>
+          <label>topk<input name="topk" type="number" value="300"></label>
+          <label>refs_out<input name="refs_out" value="top300_refs.txt"></label>
+          <label>export_dir<input name="export_dir" value="/mnt/e/mattergen_runs/results200/top300_run/exported_300cifs"></label>
+          <label>export_prefix<input name="export_prefix" value="cand300"></label>
+          <label>export_index_name<input name="export_index_name" value="export_300index.csv"></label>
+          <label>ehull_threshold<input name="ehull_threshold" type="number" step="0.01" value="0.05"></label>
+          <label>voltage_step (可空)<input name="voltage_step" type="number" step="0.1" placeholder="留空使用默认"></label>
+          <label>voltage_threshold<input name="voltage_threshold" type="number" step="0.01" value="0.05"></label>
+          <label class="toggle-row"><input type="checkbox" name="dry_run"> dry-run（跳过 CHGNet/MP）</label>
+          <button type="submit">运行 run_top300_pipeline.py</button>
+          <p class="small-hint">需已安装 CHGNet / MP API。dry-run 仅导出 refs & CIF。</p>
+        </form>
+      </article>
+    </section>
+
+    <section class="jobs">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">作业</p>
+            <h2>队列 / 历史</h2>
+          </div>
+          <div class="action-row">
+            <label class="inline-input">生成分段数
+              <input id="full-batches" type="number" min="1" value="1" title="先分段运行生成，完成后统一评估、快筛和精选导出">
+            </label>
+            <button class="ghost" id="refresh-jobs">刷新</button>
+            <button class="ghost" id="run-full">一键全流程</button>
+          </div>
+          <p class="small-hint">一键全流程会先按生成分段数运行 dd.sh，输出到 <code>BASE_RESULTS_DIR/_segments/batchXXX</code>；全部生成完成后再统一 eval→screen→top300，得到全局 Top-K。</p>
+        </div>
+        <div class="job-table-wrap">
+          <table class="job-table">
+            <thead>
+              <tr><th>类型</th><th>ID</th><th>状态</th><th>创建时间</th><th>耗时</th><th>结束时间(北京)</th><th>操作</th></tr>
+            </thead>
+            <tbody id="jobs-body">
+              <tr><td colspan="7" class="muted">暂无任务</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel log-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">日志</p>
+            <h2 id="log-title">选择一个作业查看输出</h2>
+          </div>
+          <span class="chip" id="log-status"></span>
+        </div>
+        <pre id="log-viewer" class="log-viewer">—</pre>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">电化学窗口</p>
+          <h2>chgnet_voltage_window_top300.csv</h2>
+        </div>
+        <div class="action-row">
+          <label style="color:var(--muted); font-size:0.9rem;">CSV 路径 <input id="voltage-path" value="/mnt/e/mattergen_runs/results200/top300_run/chgnet_voltage_window_top300.csv"></label>
+          <button class="ghost" id="load-voltage">加载</button>
+        </div>
+      </div>
+      <div class="voltage-table-wrap">
+        <table class="job-table">
+          <thead id="voltage-head"></thead>
+          <tbody id="voltage-body"><tr><td class="muted">未加载</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel viewer-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">结构预览</p>
+          <h2>3Dmol.js 交互浏览</h2>
+        </div>
+      </div>
+      <div class="viewer-controls">
+        <label>结构目录<input id="viewer-dir" value="/mnt/e/mattergen_runs/results200"></label>
+        <button id="viewer-load">加载列表</button>
+      </div>
+      <div class="viewer-body">
+        <div class="viewer-list">
+          <ul id="viewer-files"></ul>
+        </div>
+        <div class="viewer-view">
+          <div id="viewer3d">点击左侧文件以预览</div>
+          <pre id="viewer-text" class="log-viewer">尚未选择文件</pre>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

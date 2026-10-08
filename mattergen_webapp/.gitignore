@@ -1,0 +1,36 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+node_modules/
+.idea/
+.vscode/
+.DS_Store
+
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated runs, analysis reports, plots, and trajectories
+/results*
+/runs*
+/md_traj*
+/analysis/
+/backend/job_logs/
+/_runtime/
+/checkpoints/
+*.log
+*.traj
+*.extxyz
+*.ckpt
+
+# Empty files accidentally created from command-line options
+/--*
