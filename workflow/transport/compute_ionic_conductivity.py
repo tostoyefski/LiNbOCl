@@ -1,37 +1,78 @@
 #!/usr/bin/env python3
-import argparse, csv
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import Dict, List, Tuple
+"""Run CHGNet MD only for candidates accepted by the hull/voltage pipeline."""
+from __future__ import annotations
 
-import numpy as np
-import torch
-from ase import units
-from ase.io.trajectory import Trajectory
-from ase.md.analysis import DiffusionCoefficient
-from ase.md.velocitydistribution import (
-    MaxwellBoltzmannDistribution,
-    Stationary,
-    ZeroRotation,
-)
-from chgnet.model import CHGNet
-from chgnet.model.dynamics import CHGNetCalculator, MolecularDynamics
-from pymatgen.core import Structure
-from pymatgen.io.ase import AseAtomsAdaptor
-from pymatgen.transformations.advanced_transformations import SQSTransformation
-from pymatgen.transformations.standard_transformations import (
-    OrderDisorderedStructureTransformation,
-)
+import argparse
+import csv
+import math
+from pathlib import Path
+from typing import Dict, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+    from chgnet.model import CHGNet
+    from chgnet.model.dynamics import CHGNetCalculator
+    from pymatgen.core import Structure
 
 E_CHARGE = 1.602176634e-19  # C
 K_B = 1.380649e-23  # J/K
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TRANSPORT_RESULTS = REPO_ROOT / "results" / "transport"
+
+
+def load_md_candidates(csv_path: Path | str) -> List[Dict[str, str]]:
+    """Validate final-selection metadata before loading an MD model."""
+    with Path(csv_path).open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        required = {"file", "passes_voltage_filter", "window_status", "window"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                "MD input must be the audited final_candidates.csv; "
+                f"missing columns: {sorted(missing)}"
+            )
+        rows = list(reader)
+    accepted = []
+    for row in rows:
+        reason = None
+        if (row.get("passes_voltage_filter") or "").strip().lower() not in {"true", "1", "yes"}:
+            reason = "passes_voltage_filter is not true"
+        elif row.get("window_status") not in {"stable_window", "scan_censored"}:
+            reason = f"ineligible window_status={row.get('window_status')}"
+        elif (row.get("error") or "").strip():
+            reason = row["error"]
+        elif (row.get("stable_at_target") or "").strip().lower() in {"false", "0", "no"}:
+            reason = "candidate is unstable at target_voltage"
+        elif not (row.get("file") or "").strip():
+            reason = "missing CIF filename"
+        else:
+            try:
+                width = float(row["window"])
+                if not math.isfinite(width) or width <= 0:
+                    reason = "window must be finite and positive"
+                target = (row.get("target_voltage") or "").strip()
+                if target:
+                    if not math.isfinite(float(target)):
+                        reason = "target_voltage must be finite"
+                    elif (row.get("stable_at_target") or "").strip().lower() not in {"true", "1", "yes"}:
+                        reason = "candidate is not confirmed stable at target_voltage"
+            except (TypeError, ValueError):
+                reason = "invalid numeric voltage metadata"
+        if reason:
+            print(f"[REJECT] {row.get('file') or '(unnamed candidate)'}: {reason}")
+        else:
+            accepted.append(row)
+    return accepted
 
 def run_md(struct: Structure, temp: float, timestep_fs: float,
            total_ps: float, replicate: int, calculator: CHGNetCalculator, model: CHGNet,
            log_interval: int, traj_path: Path, log_path: Path,
            rng: np.random.Generator | None = None) -> Tuple[Path, 'ase.Atoms']:
+    import numpy as np
+    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
+    from chgnet.model.dynamics import MolecularDynamics
+    from pymatgen.io.ase import AseAtomsAdaptor
+
     atoms = AseAtomsAdaptor.get_atoms(struct)
     if replicate > 1:
         atoms = atoms.repeat((replicate, replicate, replicate))
@@ -74,6 +115,9 @@ def resolve_disorder(
     sqs_scale: isotropic supercell multiplier when attempting SQS
     sqs_steps: MC steps for SQS (if available)
     """
+    from pymatgen.transformations.advanced_transformations import SQSTransformation
+    from pymatgen.transformations.standard_transformations import OrderDisorderedStructureTransformation
+
     if struct.is_ordered or strategy == "none":
         return struct
 
@@ -119,10 +163,10 @@ def resolve_disorder(
         msg += f" Last error: {last_exc}"
     raise ValueError(msg)
 
-def main():
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="Estimate ionic conductivity via CHGNet MD.")
-    ap.add_argument("--csv", default="results9/top300_run/chgnet_voltage_window_top300.csv")
-    ap.add_argument("--cif-dir", default="results9/top300_run/exported_300cifs")
+    ap.add_argument("--csv", default=str(REPO_ROOT / "results/top300_run/final_candidates.csv"), help="Audited CSV of candidates passing both hull and voltage gates.")
+    ap.add_argument("--cif-dir", default=str(REPO_ROOT / "results/top300_run/exported_300cifs"))
     ap.add_argument("--mobile-element", default="Li")
     ap.add_argument("--temperature", type=float, default=700.0)
     ap.add_argument(
@@ -171,16 +215,34 @@ def main():
         default=None,
         help="Base random seed for velocity initialization; run index is added to differentiate runs.",
     )
-    ap.add_argument("--traj-dir", default="md_traj", help="directory to store MD trajectories/logs")
-    ap.add_argument("--out", default="chgnet_ionic_conductivity.csv")
+    ap.add_argument("--traj-dir", default=str(TRANSPORT_RESULTS / "md_traj"), help="directory to store MD trajectories/logs")
+    ap.add_argument("--out", default=str(TRANSPORT_RESULTS / "chgnet_ionic_conductivity.csv"))
     ap.add_argument(
         "--arrhenius-summary",
         default=None,
         help="Optional path to write ln(sigma*T) vs 1/T fit per structure when multiple temperatures are provided; defaults to <out> with _arrhenius suffix.",
     )
-    args = ap.parse_args()
+    return ap.parse_args(argv)
 
-    rows: List[Dict[str, str]] = list(csv.DictReader(open(args.csv)))
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        rows = load_md_candidates(args.csv)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not rows:
+        print("[INFO] No eligible final candidates; no MD runs requested.")
+        return
+
+    import numpy as np
+    import torch
+    from ase import units
+    from ase.io.trajectory import Trajectory
+    from ase.md.analysis import DiffusionCoefficient
+    from chgnet.model import CHGNet
+    from chgnet.model.dynamics import CHGNetCalculator
+    from pymatgen.core import Structure
 
     if args.device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -344,6 +406,7 @@ def main():
         print("[WARN] no results produced; check warnings above.")
         return
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=results[0].keys())
         writer.writeheader()
@@ -413,6 +476,7 @@ def main():
             )
 
         if summary_rows:
+            Path(summary_path).parent.mkdir(parents=True, exist_ok=True)
             with open(summary_path, "w", newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=summary_rows[0].keys())
                 writer.writeheader()

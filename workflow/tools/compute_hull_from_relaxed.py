@@ -28,29 +28,31 @@
 
   MP/DFT 基线（建议先把每帧的 DFT 能量放在 CSV 里）：
 
-    python compute_hull_from_relaxed.py \
+    python workflow/tools/compute_hull_from_relaxed.py \
 
-      --root results/chemical_system_energy_above_hull \
+      --root results/_segments \
 
-      --mode mp --energies-csv dft_energies.csv --out hull_mp.csv
+      --mode mp --energies-csv dft_energies.csv --out results/hull_mp.csv
 
 
 
   纯 CHGNet 基线（无需 DFT 能量；会为每个 chemsys 拉取 MP 结构并用 CHGNet 取能）：
 
-    python compute_hull_from_relaxed.py --root results/chemical_system_energy_above_hull --mode chgnet --max-mp-competitors 300 --out hull_chgnet.csv
+    python workflow/tools/compute_hull_from_relaxed.py --root results/_segments --mode chgnet --max-mp-competitors 300 --out results/hull_chgnet.csv
 
 
 
 注意：
 
-- 访问 Materials Project 需设置环境变量 MP_API_KEY，或用 --mp-api-key 传入。:contentReference[oaicite:3]{index=3}
+- 访问 Materials Project 需设置环境变量 MP_API_KEY，或用 --mp-api-key 传入。
 
-- MP 模式下，若混入非同修正/非同功能的能量会产生系统误差；建议按 MP2020 方案做同样校正。:contentReference[oaicite:4]{index=4}
+- MP 模式下，若混入非同修正/非同功能的能量会产生系统误差；建议按 MP2020 方案做同样校正。
 
 """
 
 
+
+from __future__ import annotations
 
 import argparse
 
@@ -63,6 +65,8 @@ import os
 from pathlib import Path
 
 from collections import defaultdict
+from itertools import combinations
+from time import sleep
 
 from typing import Dict, List, Tuple, Optional
 
@@ -79,32 +83,6 @@ from pymatgen.entries.computed_entries import ComputedStructureEntry
 from pymatgen.entries.compatibility import MaterialsProject2020Compatibility
 
 from pymatgen.analysis.phase_diagram import PhaseDiagram
-
-
-
-# MP API（新版 mp-api）
-
-from mp_api.client import MPRester
-
-
-
-# CHGNet（仅在 --mode chgnet 时导入/使用）
-
-try:
-
-    from chgnet.model.model import CHGNet
-
-    from chgnet.model.dynamics import CHGNetCalculator
-
-except ImportError as e:
-    raise RuntimeError(f"CHGNet 导入失败，请检查 chgnet 安装与依赖：{e}")
-
-
-    CHGNet = None
-
-    CHGNetCalculator = None
-
-
 
 
 
@@ -267,15 +245,13 @@ def build_entries_chgnet(frames, device: Optional[str] = None) -> Dict[str, List
 
     """
 
-    if CHGNetCalculator is None:
+    from chgnet.model.dynamics import CHGNetCalculator
 
-        raise RuntimeError("未找到 CHGNet，请先安装 chgnet 并确保可用。")
-
-    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)  # :contentReference[oaicite:6]{index=6}
+    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)
 
     groups = defaultdict(list)
 
-    
+
     import math
     for ext_path, idx, struct in frames:
         try:
@@ -302,7 +278,7 @@ def fetch_mp_competitors_entries(chemsys: str, mpr: MPRester) -> List:
 
     """
 
-    取 MP thermo entries（已在服务器端做过统一修正/混合），用于 mp 模式。:contentReference[oaicite:7]{index=7}
+    取 MP thermo entries（已在服务器端做过统一修正/混合），用于 mp 模式。
 
     """
 
@@ -316,18 +292,14 @@ def fetch_mp_competitors_entries(chemsys: str, mpr: MPRester) -> List:
 
 
 
-# --- 放在原位置，完全替换你的 fetch_mp_competitors_structures ---
-from itertools import combinations
-from time import sleep
-from typing import List, Optional
-from pymatgen.core import Structure
-from mp_api.client.core.client import MPRestError
 
 def fetch_mp_competitors_structures(chemsys: str, mpr, limit: Optional[int] = None) -> List[Structure]:
     """
     分批抓取 MP 竞争相：对 elems 的所有子集，用 chemsys 精确查询。
     优先稳定相，并确保补齐每个元素的端元（unary）。
     """
+    from mp_api.client.core.client import MPRestError
+
     elems = chemsys.split("-")
     out_docs = []
     seen_mids = set()
@@ -373,11 +345,9 @@ def fetch_mp_competitors_structures(chemsys: str, mpr, limit: Optional[int] = No
 
 def entries_from_structures_with_chgnet(structs: List[Structure], device: Optional[str] = None) -> List[ComputedStructureEntry]:
 
-    if CHGNetCalculator is None:
+    from chgnet.model.dynamics import CHGNetCalculator
 
-        raise RuntimeError("未找到 CHGNet，请先安装 chgnet 并确保可用。")
-
-    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)  # :contentReference[oaicite:8]{index=8}
+    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)
 
     entries = []
 
@@ -406,6 +376,8 @@ def entries_from_structures_with_chgnet(structs: List[Structure], device: Option
 def main():
 
     args = parse_args()
+
+    from mp_api.client import MPRester
 
     root = Path(args.root).resolve()
 
@@ -455,11 +427,11 @@ def main():
 
             if args.mode == "mp":
 
-                comp_entries = fetch_mp_competitors_entries(csys, mpr)  # 服务器端的 thermo entries（含修正）。:contentReference[oaicite:9]{index=9}
+                comp_entries = fetch_mp_competitors_entries(csys, mpr)  # 服务器端的 thermo entries（含修正）。
 
             else:
 
-                comp_structs = fetch_mp_competitors_structures(csys, mpr, args.max_mp_competitors)  # :contentReference[oaicite:10]{index=10}
+                comp_structs = fetch_mp_competitors_structures(csys, mpr, args.max_mp_competitors)
 
                 comp_entries = entries_from_structures_with_chgnet(comp_structs)
 
@@ -484,7 +456,7 @@ def main():
 
             try:
 
-                pd = PhaseDiagram(comp_entries + my_entries)  # 标准 PD；MP 网站也是用这套。:contentReference[oaicite:11]{index=11}
+                pd = PhaseDiagram(comp_entries + my_entries)  # 标准 PD；MP 网站也是用这套。
 
             except Exception as e:
 

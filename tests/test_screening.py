@@ -11,7 +11,7 @@ from pymatgen.core import Composition, Lattice, Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "mattergen_webapp" / "scripts" / "screen_all_extxyz.py"
+SCRIPT = REPO / "workflow" / "pipeline" / "screen_all_extxyz.py"
 spec = importlib.util.spec_from_file_location("screening_under_test", SCRIPT)
 screen = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = screen
@@ -215,9 +215,10 @@ def test_cli_default_chemistry_accepts_neutral_target_and_audits_non_neutral(tmp
     valid = Structure(Lattice.orthorhombic(2.5, 12, 12), species, coordinates)
     invalid = Structure(Lattice.orthorhombic(2.5, 12, 12), ["Li"] * 3 + species, [[.8, .1, .8], [.6, .1, .8], [.4, .1, .8], *coordinates])
     write(folder / "relaxed.extxyz", [AseAtomsAdaptor.get_atoms(s) for s in (valid, invalid)])
-    assert screen.main(["--workdir", str(tmp_path), "--base", "input", "--out", "accepted.csv", "--required-elements", "Li", "Nb", "O", "Cl", "--allowed-elements", "Li", "Nb", "O", "Cl"]) == 0
-    accepted = pd.read_csv(tmp_path / "accepted.csv")
-    rejected = pd.read_csv(tmp_path / "screened_out.csv")
+    output = tmp_path / "screen outputs"
+    assert screen.main(["--workdir", str(tmp_path), "--base", "input", "--out", "screen outputs/accepted.csv", "--required-elements", "Li", "Nb", "O", "Cl", "--allowed-elements", "Li", "Nb", "O", "Cl"]) == 0
+    accepted = pd.read_csv(output / "accepted.csv")
+    rejected = pd.read_csv(output / "screened_out.csv")
     assert len(accepted) == 1
     assert len(rejected) == 1
     assert accepted.iloc[0].charge_balance_status == "pass"
@@ -226,4 +227,14 @@ def test_cli_default_chemistry_accepts_neutral_target_and_audits_non_neutral(tmp
     assert accepted.iloc[0].quick_score == pytest.approx(1 / 3)
     assert rejected.iloc[0].charge_balance_status == "fail"
     assert "charge_balance_fail" in rejected.iloc[0].filtered_reasons
-    assert (tmp_path / "top150_refs.txt").read_text().endswith("relaxed.extxyz::0")
+    assert (output / "screen_refs.txt").read_text().endswith("relaxed.extxyz::0")
+    assert not (tmp_path / "screen_refs.txt").exists()
+    assert not (tmp_path / "screened_out.csv").exists()
+
+
+def test_cli_default_paths_use_repo_results():
+    args = screen.build_parser().parse_args([])
+    assert Path(args.base) == REPO / "results"
+    assert Path(args.out) == REPO / "results" / "stage2_candidates.csv"
+    assert args.refs_out is None
+    assert args.screened_out is None

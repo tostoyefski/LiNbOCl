@@ -19,12 +19,12 @@ set -euo pipefail
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate mattergen
 
-PROJECT_ROOT="${PROJECT_ROOT:-$HOME/mattergen_project}"
+PROJECT_ROOT="${PROJECT_ROOT:-$HOME/LiNbOCl}"
 export MATTERGEN_ROOT="$PROJECT_ROOT/mattergen"
-export WEBAPP_ROOT="$PROJECT_ROOT/mattergen_webapp"
+export WORKFLOW_ROOT="$PROJECT_ROOT/workflow"
 
 # Put outputs and caches on the high-capacity parallel filesystem, not $HOME.
-export RESULTS_ROOT="${RESULTS_ROOT:-$SCRATCH/mattergen_runs/results200}"
+export RESULTS_ROOT="${RESULTS_ROOT:-$SCRATCH/mattergen_runs/results}"
 export RUNTIME_ROOT="${RUNTIME_ROOT:-$SCRATCH/mattergen_runs/_runtime}"
 
 # Do not print your real key in logs. Prefer adding it as a scheduler secret if available.
@@ -39,4 +39,4 @@ export TOPK="${TOPK:-300}"
 
 mkdir -p logs "$RESULTS_ROOT" "$RUNTIME_ROOT"
 
-bash "$WEBAPP_ROOT/scripts/run_full_pipeline_hpc.sh"
+bash "$WORKFLOW_ROOT/pipeline/run_full_pipeline.sh"

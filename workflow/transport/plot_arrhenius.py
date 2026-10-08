@@ -4,6 +4,8 @@ import csv
 import math
 from pathlib import Path
 
+TRANSPORT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "transport"
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -197,7 +199,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--input",
-        required=True,
+        default=TRANSPORT_RESULTS / "chgnet_ionic_conductivity_arrhenius.csv",
         type=Path,
         help="Path to chgnet_ionic_conductivity_arrhenius.csv",
     )

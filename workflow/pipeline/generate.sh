@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 自定义元素组合的批量生成脚本（独立于原仓库 dd.sh）
+# LiNbOCl 批量生成入口；默认生成 Li-Nb-O-Cl 四元素体系。
 # 关键参数（可通过环境变量覆盖）：
 #   MODEL_NAME            预训练模型名（传给 mattergen-generate）
 #   BASE_RESULTS_DIR      结果输出根目录（可填绝对路径）
@@ -15,8 +15,9 @@
 
 set -euo pipefail
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODEL_NAME="${MODEL_NAME:-chemical_system_energy_above_hull}"
-BASE_RESULTS_DIR="${BASE_RESULTS_DIR:-results/${MODEL_NAME}}"
+BASE_RESULTS_DIR="${BASE_RESULTS_DIR:-$PROJECT_ROOT/results}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 E_AH="${E_AH:-0.05}"
 GUIDANCE="${GUIDANCE:-2.0}"

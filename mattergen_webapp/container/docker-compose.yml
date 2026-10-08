@@ -11,9 +11,9 @@ services:
     shm_size: "16gb"
     environment:
       MATTERGEN_ROOT: /workspace/mattergen
-      WEBAPP_ROOT: /workspace/mattergen_webapp
+      WORKFLOW_ROOT: /workspace/workflow
       MATTERGEN_RUNTIME_ROOT: /runs/_runtime
-      RESULTS_ROOT: /runs/results200
+      RESULTS_ROOT: /runs/results
       RUNTIME_ROOT: /runs/_runtime
       MP_API_KEY: ${MP_API_KEY}
       TMPDIR: /runs/_runtime/tmp
@@ -43,9 +43,9 @@ services:
     shm_size: "16gb"
     environment:
       MATTERGEN_ROOT: /workspace/mattergen
-      WEBAPP_ROOT: /workspace/mattergen_webapp
+      WORKFLOW_ROOT: /workspace/workflow
       MATTERGEN_RUNTIME_ROOT: /runs/_runtime
-      RESULTS_ROOT: /runs/results200
+      RESULTS_ROOT: /runs/results
       RUNTIME_ROOT: /runs/_runtime
       MP_API_KEY: ${MP_API_KEY}
       CHEMICAL_SYSTEMS: ${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}
@@ -56,4 +56,4 @@ services:
       TOPK: ${TOPK:-300}
     volumes:
       - ${MATTERGEN_RUNS_DIR:-/data/mattergen_runs}:/runs
-    command: ["bash", "/workspace/mattergen_webapp/scripts/run_full_pipeline_container.sh"]
+    command: ["bash", "/workspace/workflow/pipeline/run_full_pipeline.sh"]

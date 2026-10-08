@@ -6,7 +6,7 @@ import pytest
 from ase import Atoms
 from ase.io import write
 
-from mattergen_webapp.scripts.candidate_selection import select_candidates
+from workflow.pipeline.candidate_selection import select_candidates
 
 
 def crystal(symbols="LiCl", positions=None):
@@ -78,7 +78,7 @@ def test_diverse_mode_covers_real_reduced_compositions_before_second_polymorph(t
 
 
 def test_audit_csv_preserves_every_input_row_and_failure(tmp_path):
-    from mattergen_webapp.scripts.candidate_selection import write_selection_audit
+    from workflow.pipeline.candidate_selection import write_selection_audit
 
     rows = write_rows(tmp_path, [crystal(), crystal()], [3, 2])
     rows.append({"path": str(tmp_path / "missing.extxyz"), "frame": "0", "quick_score": "4"})
@@ -191,7 +191,7 @@ def test_missing_malformed_and_nonperiodic_source_structures_fail_closed(tmp_pat
 
 
 def test_empty_input_and_zero_topk_still_write_an_audit(tmp_path):
-    from mattergen_webapp.scripts.candidate_selection import write_selection_audit
+    from workflow.pipeline.candidate_selection import write_selection_audit
 
     empty = select_candidates([], 300)
     write_selection_audit(empty, tmp_path / "empty.csv")

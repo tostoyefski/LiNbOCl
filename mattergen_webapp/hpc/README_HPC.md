@@ -1,128 +1,44 @@
-# MatterGen 超算迁移说明
+# HPC / Slurm 部署
 
-这套迁移方案不依赖网页服务，直接用调度系统跑命令行版全流程：
+HPC 使用统一入口 `workflow/pipeline/run_full_pipeline.sh`，无需启动 Web。操作参数和筛选规则见 [工作流指南](../../workflow/README.md)。
 
-1. 分段运行 `dd.sh` 生成结构。
-2. 所有分段生成完成后统一 `eval_all.sh`。
-3. 对全部 `relaxed.extxyz` 统一 `screen_all_extxyz.py`。
-4. 从全局 `stage2_candidates.csv` 先去重并选取最多 Top-K 个候选，导出 CIF。
-5. 计算体相稳定性与电压窗口，写出通过两道筛选的 `final_candidates.csv` 和接受/拒绝审计。
+## 1. 准备完整仓库与环境
 
-筛选规则、字段含义和手动 CLI 示例见 [Web/CLI 说明](../README.md#筛选规则与审计)。HPC 与 Web 使用同一套筛选脚本。
+在集群克隆整个仓库，或一次上传完整 LiNbOCl 目录，保留三个子目录的相对布局：
 
-## 1. 需要迁移的内容
-
-建议在超算上放成：
+```bash
+git clone https://github.com/tostoyefski/LiNbOCl.git "$HOME/LiNbOCl"
+cd "$HOME/LiNbOCl"
+```
 
 ```text
-$HOME/mattergen_project/
-  mattergen/
-  mattergen_webapp/
+LiNbOCl/
+├── workflow/
+├── mattergen/
+└── mattergen_webapp/
 ```
 
-本仓库只保存代码和部署说明；生成环境、模型权重和缓存需要单独准备。结果目录可选迁移；若只重新跑，不需要搬旧结果。
+按照 [根 README](../../README.md#安装) 和 [MatterGen 环境说明](../../mattergen/README.md#installation) 安装环境。若集群使用 module/conda，按集群要求配置 CUDA 和 Python，再安装 `mattergen/`、Web 后端依赖、CHGNet 与 mp-api。模型缓存需要单独准备；计算节点不能联网时，应预先放到 `$RUNTIME_ROOT/huggingface`。
 
-## 2. 上传代码和模型缓存
+## 2. 修改调度模板
 
-示例：
+编辑 `mattergen_webapp/hpc/slurm_full_pipeline.sbatch`：调整 partition、GPU 数量、CPU、内存、walltime，以及环境激活命令。模板的环境激活必须与实际安装方式一致，例如使用 conda，或激活仓库内的 MatterGen 虚拟环境。
+
+完整体相/电压计算前设置自己的 `MP_API_KEY`，不要将真实密钥提交到 Git。结果与缓存建议放在集群的大容量文件系统；下面假定集群已定义 `$SCRATCH`：
 
 ```bash
-rsync -avh --exclude '.venv' --exclude '__pycache__' \
-  /home/tao/mattergen user@cluster:$HOME/mattergen_project/
-
-rsync -avh --exclude '.venv' --exclude '__pycache__' \
-  /home/tao/mattergen_webapp user@cluster:$HOME/mattergen_project/
-
-rsync -avh /mnt/e/mattergen_runs/_runtime/huggingface/ \
-  user@cluster:$SCRATCH/mattergen_runs/_runtime/huggingface/
+export PROJECT_ROOT="$PWD"
+export MATTERGEN_ROOT="$PROJECT_ROOT/mattergen"
+export WORKFLOW_ROOT="$PROJECT_ROOT/workflow"
+export RESULTS_ROOT="$SCRATCH/LiNbOCl/results"
+export RUNTIME_ROOT="$SCRATCH/LiNbOCl/_runtime"
 ```
 
-如果超算计算节点不能联网，模型缓存必须提前传上去。
+`PROJECT_ROOT` 指向整个仓库，`WORKFLOW_ROOT` 指向其中的 `workflow/`。不会分别上传或安装两套项目脚本。
 
-## 3. 创建 Python 环境
+## 3. 提交任务
 
-在超算登录节点或交互节点上：
-
-```bash
-module load cuda/12.1        # 按超算实际模块修改
-module load anaconda/2023    # 按超算实际模块修改
-
-conda create -n mattergen python=3.10 -y
-conda activate mattergen
-
-cd $HOME/mattergen_project/mattergen
-pip install -e .
-
-cd $HOME/mattergen_project/mattergen_webapp
-pip install -r backend/requirements.txt
-pip install chgnet mp-api ase pymatgen pandas tqdm smact
-```
-
-如果集群推荐 Apptainer/Singularity，优先用容器，避免节点环境差异。
-
-## 4. 设置 MP API Key
-
-不要把真实 key 写进提交脚本。可在提交前执行：
-
-```bash
-export MP_API_KEY='你的 Materials Project API key'
-```
-
-或写入权限受限的文件：
-
-```bash
-echo "export MP_API_KEY='你的key'" > ~/.mattergen_secrets
-chmod 600 ~/.mattergen_secrets
-source ~/.mattergen_secrets
-```
-
-## 5. 修改 Slurm 模板
-
-编辑：
-
-```text
-mattergen_webapp/hpc/slurm_full_pipeline.sbatch
-```
-
-重点改这些：
-
-```bash
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
-#SBATCH --time=72:00:00
-
-module load cuda/12.1
-module load anaconda/2023
-conda activate mattergen
-```
-
-以及结果和缓存目录：
-
-```bash
-export RESULTS_ROOT="$SCRATCH/mattergen_runs/results200"
-export RUNTIME_ROOT="$SCRATCH/mattergen_runs/_runtime"
-```
-
-## 6. 提交任务
-
-```bash
-cd $HOME/mattergen_project/mattergen_webapp
-mkdir -p logs
-sbatch hpc/slurm_full_pipeline.sbatch
-```
-
-查看状态：
-
-```bash
-squeue -u $USER
-tail -f logs/mattergen-full-<jobid>.out
-```
-
-## 7. 调整运行规模
-
-等价于本机网页中的“一键全流程”：
+从仓库根目录提交：
 
 ```bash
 export CHEMICAL_SYSTEMS='Li-Nb-O-Cl'
@@ -130,76 +46,49 @@ export BATCH_SIZE=16
 export NUM_BATCHES_PER_SEGMENT=20
 export SEGMENTS=10
 export TOPK=300
-sbatch hpc/slurm_full_pipeline.sbatch
+mkdir -p logs
+sbatch mattergen_webapp/hpc/slurm_full_pipeline.sbatch
 ```
 
-总生成量约为：
-
-```text
-BATCH_SIZE * NUM_BATCHES_PER_SEGMENT * SEGMENTS
-```
-
-比如 `16 * 20 * 10 = 3200` 个结构。
-
-筛选相关环境变量如下；列表使用空格分隔：
-
-| 环境变量 | 默认值 | 作用 |
-| --- | --- | --- |
-| `REQUIRED_ELEMENTS` | `Li Nb O Cl` | 每个候选必须包含的元素 |
-| `ALLOWED_ELEMENTS` | `Li Nb O Cl` | 元素白名单；设置为空可取消白名单 |
-| `REQUIRE_CHARGE_BALANCE` | `1` | 固定计量式电中性过滤 |
-| `USE_SMACT` | `1` | SMACT Pauling 规则及电中性过滤 |
-| `FILTER_LIGHT_OXY` | `1` | 是否实际过滤氧/卤素比例 |
-| `LIGHT_OXY` | `0.05 0.35` | `O/(O+F+Cl+Br+I)` 的闭区间 |
-| `R_CUT` | `3.0` | 周期 Li 图的近邻截断距离，Å |
-| `SELECTION_MODE` | `diverse` | 约化组成轮流选取；`score` 为分数排序；两者都先去重 |
-| `VOLTAGE_THRESHOLD` | `0.001` | 电压稳定性数值容差，eV/non-Li atom |
-| `TARGET_VOLTAGE` | 空 | 可选工作电压，相对 Li/Li⁺；指定后要求该精确电压稳定 |
-| `MIN_VOLTAGE_WINDOW` | `0.0` | 最小已采样稳定区间宽度，V；默认仍要求非零宽度 |
-| `DRY_RUN` | `0` | `1` 时止于去重、选择和 CIF 导出 |
-
-例如附加工作电压条件：
+总生成量约为 `16 × 20 × 10 = 3200` 个结构。查看调度状态和日志，下面将 12345 替换为实际任务号：
 
 ```bash
-export REQUIRED_ELEMENTS='Li Nb O Cl'
-export ALLOWED_ELEMENTS='Li Nb O Cl'
-export SELECTION_MODE=diverse
-export VOLTAGE_THRESHOLD=0.001
-export TARGET_VOLTAGE=4.5
-export MIN_VOLTAGE_WINDOW=1.0
-sbatch hpc/slurm_full_pipeline.sbatch
+squeue -u "$USER"
+tail -f logs/mattergen-full-12345.out
 ```
 
-不指定工作电压时保持 `TARGET_VOLTAGE` 为空。切换其他体系时应同步调整生成体系与 required/allowed 元素；氧比例过滤和化学检查只有通过显式设置对应开关为 `0` 才会关闭。关闭独立电中性过滤不会关闭 SMACT 内部的电中性检查。
+不经调度模板、在已分配的交互计算节点运行时：
 
-## 8. 输出位置
+```bash
+bash workflow/pipeline/run_full_pipeline.sh
+```
+
+## 4. 调整筛选
+
+常用参数及默认值统一见 [工作流参数表](../../workflow/README.md#2-生成并运行全流程)。默认要求 `Li Nb O Cl` 全部存在且只允许这四种元素，启用化学与氧比例过滤；先去重、按组成轮流选择；电压容差为 0.001 eV/non-Li atom。
+
+例如附加工作电压条件后再提交：
+
+```bash
+export SELECTION_MODE=diverse
+export TARGET_VOLTAGE=4.5
+export MIN_VOLTAGE_WINDOW=1.0
+sbatch mattergen_webapp/hpc/slurm_full_pipeline.sbatch
+```
+
+`TARGET_VOLTAGE` 为空时不附加工作电压条件。`DRY_RUN=1` 仍执行生成和评估，随后只做选择和 CIF 导出。已有结构重跑筛选时，用 [已有结果命令](../../workflow/README.md#3-从已有-relaxedextxyz-重跑)，无需重新提交生成。
+
+## 5. 输出与迁移
 
 ```text
-$RESULTS_ROOT/_segments/batch001/...       分段生成结果
-$RESULTS_ROOT/full_pipeline_segments.txt   分段清单
-$RESULTS_ROOT/logs_eval/                   评估日志
-$RESULTS_ROOT/stage2_candidates.csv        全部通过化学与组成过滤的候选
-$RESULTS_ROOT/screened_out.csv             拒绝/读取错误及原因
-$RESULTS_ROOT/top300_refs.txt              几何分数参考列表，未做最终去重
-$RESULTS_ROOT/top300_run/top300_refs.txt    去重和多样性选择后的引用
-$RESULTS_ROOT/top300_run/selection_audit.csv
-$RESULTS_ROOT/top300_run/selection_summary.json
-$RESULTS_ROOT/top300_run/exported_300cifs/  本次精选 CIF 及导出索引
-$RESULTS_ROOT/top300_run/chgnet_hull_top300.csv
-$RESULTS_ROOT/top300_run/chgnet_hull_top300_filtered.csv
-$RESULTS_ROOT/top300_run/chgnet_voltage_window_top300.csv
-$RESULTS_ROOT/top300_run/voltage_filter_audit.csv
+$RESULTS_ROOT/_segments/                  生成及评估结果
+$RESULTS_ROOT/logs_eval/                  评估日志
+$RESULTS_ROOT/stage2_candidates.csv       化学通过候选
+$RESULTS_ROOT/screened_out.csv            拒绝/错误审计
+$RESULTS_ROOT/top300_run/                 选择、导出、体相和电压结果
 $RESULTS_ROOT/top300_run/final_candidates.csv
 ```
 
-`quick_score` 只表示周期 Li 图的几何贯通程度，不能解释为电导率。电压结果保留所有稳定区间、边界夹区和扫描截尾标记；计算失败独立记录，不会充当分解边界。最终列表要求体相通过且有非零稳定区间，附加的工作电压和最小宽度条件也必须满足；它仍需后续 DFT/MD 验证。
+选择审计、最终电压审计和各表含义见 [结果说明](../../workflow/README.md#4-查找结果与筛选依据)。历史 stage2 分数不兼容当前 `score_kind=li_periodic_geometry_proxy_v1`，从已有 `relaxed.extxyz` 重跑 screen 和 Top-K 即可。
 
-旧的 stage2 分数不兼容 `score_kind=li_periodic_geometry_proxy_v1`。迁移历史结果后，应从已有 `relaxed.extxyz` 重跑 screen 和 Top-K。`DRY_RUN=1` 不产生本次体相/电压计算或最终候选结果。
-
-## 9. 常见问题
-
-- 不要把 `RESULTS_ROOT` 或 `RUNTIME_ROOT` 放在 `$HOME`，应放在 `$SCRATCH`、`$WORK` 或超算提供的大容量文件系统。
-- 如果计算节点不能联网，需要提前上传 HuggingFace 模型缓存，并确认 `HF_HOME` 指向 `$RUNTIME_ROOT/huggingface`。
-- 如果 CHGNet / MP 阶段失败，先用 `DRY_RUN=1` 测试导出逻辑，再单独检查 `MP_API_KEY` 和网络策略。
-- 如果显存不足，把 `BATCH_SIZE` 从 16 降到 8。
-- 如果单个作业时间限制短，把 `SEGMENTS` 拆小，分多次作业运行，或者让管理员提供更长 walltime 队列。
+显存不足时降低 `BATCH_SIZE`；walltime 不足时减小 `SEGMENTS`。CHGNet/MP 阶段失败可对已有 stage2 单独运行 Top-K dry-run 检查导出，再检查模型依赖、密钥和计算节点网络。

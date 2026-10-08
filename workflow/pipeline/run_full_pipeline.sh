@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Command-line full pipeline for HPC schedulers.
+# Unified command-line pipeline for local, HPC and container runs.
 # It mirrors the webapp "one-click full pipeline":
 # segmented generation first, then unified eval/screen/top-K export.
 
 set -euo pipefail
 
-WEBAPP_ROOT="${WEBAPP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-MATTERGEN_ROOT="${MATTERGEN_ROOT:-$(cd "$WEBAPP_ROOT/../mattergen" && pwd)}"
-RESULTS_ROOT="${RESULTS_ROOT:-$MATTERGEN_ROOT/results_hpc}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-$RESULTS_ROOT/_runtime}"
+WORKFLOW_ROOT="${WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PROJECT_ROOT="$(cd "$WORKFLOW_ROOT/.." && pwd)"
+PIPELINE_DIR="$WORKFLOW_ROOT/pipeline"
+MATTERGEN_ROOT="${MATTERGEN_ROOT:-$PROJECT_ROOT/mattergen}"
+RESULTS_ROOT="${RESULTS_ROOT:-$PROJECT_ROOT/results}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-$PROJECT_ROOT/_runtime}"
 
 MODEL_NAME="${MODEL_NAME:-chemical_system_energy_above_hull}"
 CHEMICAL_SYSTEMS="${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}"
@@ -60,7 +62,7 @@ mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$TORCH_HOME" "$CUDA_CACHE_PATH"
 cd "$MATTERGEN_ROOT"
 
 echo "[info] MATTERGEN_ROOT=$MATTERGEN_ROOT"
-echo "[info] WEBAPP_ROOT=$WEBAPP_ROOT"
+echo "[info] WORKFLOW_ROOT=$WORKFLOW_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
 echo "[info] RUNTIME_ROOT=$RUNTIME_ROOT"
 echo "[info] SEGMENTS=$SEGMENTS NUM_BATCHES_PER_SEGMENT=$NUM_BATCHES_PER_SEGMENT BATCH_SIZE=$BATCH_SIZE"
@@ -85,18 +87,18 @@ for i in $(seq 1 "$SEGMENTS"); do
     ELEMENTS="$ELEMENTS" \
     COMBO_SIZES="$COMBO_SIZES" \
     WORKDIR="$MATTERGEN_ROOT" \
-    bash "$WEBAPP_ROOT/scripts/dd.sh"
+    bash "$PIPELINE_DIR/generate.sh"
 done
 
-echo "==== Unified eval_all.sh over generated segments ===="
+echo "==== Unified evaluate.sh over generated segments ===="
 ROOT="$SEGMENTS_ROOT" \
   WORKDIR="$MATTERGEN_ROOT" \
   LOGDIR="$RESULTS_ROOT/logs_eval" \
   RECURSIVE=1 \
-  bash "$WEBAPP_ROOT/scripts/eval_all.sh"
+  bash "$PIPELINE_DIR/evaluate.sh"
 
 screen_cmd=(
-  python "$WEBAPP_ROOT/scripts/screen_all_extxyz.py"
+  python "$PIPELINE_DIR/screen_all_extxyz.py"
   --workdir "$MATTERGEN_ROOT"
   --base "$SEGMENTS_ROOT"
   --out "$RESULTS_ROOT/stage2_candidates.csv"
@@ -105,7 +107,7 @@ screen_cmd=(
   --super $SUPERCELL
   --required-elements $REQUIRED_ELEMENTS
   --topk "$SCREEN_TOPK"
-  --refs-out "$RESULTS_ROOT/top300_refs.txt"
+  --refs-out "$RESULTS_ROOT/screen_refs.txt"
 )
 if [[ "$REQUIRE_CHARGE_BALANCE" == "1" || "$REQUIRE_CHARGE_BALANCE" == "true" ]]; then
   screen_cmd+=(--require-charge-balance)
@@ -130,7 +132,7 @@ echo "==== Unified screen_all_extxyz.py ===="
 "${screen_cmd[@]}"
 
 top_cmd=(
-  python "$WEBAPP_ROOT/scripts/run_top300_pipeline.py"
+  python "$PIPELINE_DIR/run_top300_pipeline.py"
   --workdir "$MATTERGEN_ROOT"
   --output-dir "$RESULTS_ROOT/top300_run"
   --stage2-csv "$RESULTS_ROOT/stage2_candidates.csv"
@@ -157,4 +159,4 @@ fi
 echo "==== Global run_top300_pipeline.py ===="
 "${top_cmd[@]}"
 
-echo "[done] Full HPC pipeline finished: $RESULTS_ROOT"
+echo "[done] Full pipeline finished: $RESULTS_ROOT"

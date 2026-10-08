@@ -10,6 +10,7 @@ mkdir -p "$CONTEXT_DIR"
 
 rsync -a --delete \
   --exclude '.git' \
+  --exclude '.DS_Store' \
   --exclude '.venv' \
   --exclude '__pycache__' \
   --exclude '.mypy_cache' \
@@ -22,6 +23,7 @@ rsync -a --delete \
   --exclude 'backend/job_logs/*' \
   "$SOURCE_ROOT/mattergen" \
   "$SOURCE_ROOT/mattergen_webapp" \
+  "$SOURCE_ROOT/workflow" \
   "$CONTEXT_DIR/"
 
 docker build -f "$CONTEXT_DIR/mattergen_webapp/container/Dockerfile" -t "$IMAGE_NAME" "$CONTEXT_DIR"

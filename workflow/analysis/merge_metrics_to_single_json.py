@@ -9,18 +9,18 @@ with the SAME schema that MatterGen README/benchmark expects:
 
 用法示例：
 # 每个子目录都是 16 个结构，推荐（RMSD 按成功数加权，其他等价简单平均）
-python merge_metrics_to_single_json.py --root results/chemical_system_energy_above_hull --out combined_metrics.json --weighting successful --assume-n 16
+python workflow/analysis/merge_metrics_to_single_json.py --root results/_segments --out results/combined_metrics.json --weighting successful --assume-n 16
 
 # 或者，全等权（简单平均）
-python merge_metrics_to_single_json.py \
-  --root results/chemical_system_energy_above_hull \
-  --out combined_metrics.json \
+python workflow/analysis/merge_metrics_to_single_json.py \
+  --root results/_segments \
+  --out results/combined_metrics.json \
   --weighting equal
 
 # 只打印合并后的 JSON 预览，不写文件
-python merge_metrics_to_single_json.py \
-  --root results/chemical_system_energy_above_hull \
-  --out combined_metrics.json \
+python workflow/analysis/merge_metrics_to_single_json.py \
+  --root results/_segments \
+  --out results/combined_metrics.json \
   --dry-run
 """
 

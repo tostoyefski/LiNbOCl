@@ -5,7 +5,7 @@ This script scans a directory of CIF files, predicts their total energies with C
 fetches competing structures from the Materials Project, evaluates the convex hull,
 and reports the energy above hull (ΔE_hull) together with a stability flag.
 
-python compute_ehull_chgnet.py --cif-dir results/exported_cifs --out chgnet_hull_results.csv
+Run with workflow/pipeline/run_top300_pipeline.py to apply the export manifest and filters.
 """
 
 from __future__ import annotations
@@ -24,18 +24,21 @@ from pymatgen.analysis.phase_diagram import PhaseDiagram, PDEntry
 from pymatgen.core import Structure
 
 
+DEFAULT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "top300_run"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate ΔE_hull for CIF files with CHGNet.")
     parser.add_argument(
         "--cif-dir",
-        default="results/exported_cifs",
+        default=str(DEFAULT_RESULTS / "exported_300cifs"),
         help="Directory containing CIF files to evaluate.",
     )
     parser.add_argument("--cif-index", type=Path, default=None,
                         help="Optional export index CSV; evaluate only its CIF files, excluding stale exports.")
     parser.add_argument(
         "--out",
-        default="chgnet_hull_results.csv",
+        default=str(DEFAULT_RESULTS / "chgnet_hull_top300.csv"),
         help="Output CSV file path.",
     )
     parser.add_argument(
@@ -190,9 +193,9 @@ def structures_to_entries(structs: Iterable[Structure], model: CHGNet) -> List[P
 
 
 def main() -> None:
+    args = parse_args()
     from chgnet.model import CHGNet
     from mp_api.client import MPRester
-    args = parse_args()
 
     if not args.mp_api_key:
         raise SystemExit("MP API key not provided. Use --mp-api-key or set MP_API_KEY.")

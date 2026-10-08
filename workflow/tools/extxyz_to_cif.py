@@ -3,8 +3,8 @@
 Convert one or more frames from an .extxyz file into CIF files.
 
 Usage:
-    python extxyz_to_cif.py --input path/to/structure.extxyz --outdir output_dir
-    python extxyz_to_cif.py --input structure.extxyz --frames 0 5 7 --prefix sample
+    python workflow/tools/extxyz_to_cif.py --input path/to/structure.extxyz --outdir output_dir
+    python workflow/tools/extxyz_to_cif.py --input structure.extxyz --frames 0 5 7 --prefix sample
 
 By default, all frames are exported. Use --frames to specify specific frame indices (0-based).
 """
@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--outdir",
         type=Path,
-        default=Path("exported_cifs_from_extxyz"),
+        default=Path(__file__).resolve().parents[2] / "results" / "converted_cifs",
         help="Directory where CIF files will be written.",
     )
     parser.add_argument(

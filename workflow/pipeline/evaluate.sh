@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# 独立拷贝的 eval_all.sh，增加 WORKDIR/ROOT 可配置，避免修改原仓库。
-# 用法：ROOT=/path/to/results WORKDIR=/path/to/mattergen bash eval_all.sh
+# 对生成目录进行松弛与评估；与 generate.sh 共用 results/。
+# 用法：ROOT=/path/to/results WORKDIR=/path/to/mattergen bash workflow/pipeline/evaluate.sh
 # 一键全流程的分段目录可设置 RECURSIVE=1 递归查找待评估目录。
 
 set -u -o pipefail
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKDIR="${WORKDIR:-$(pwd)}"
-ROOT="${ROOT:-results/chemical_system_energy_above_hull}"
-LOGDIR="${LOGDIR:-logs_eval}"
+ROOT="${ROOT:-$PROJECT_ROOT/results}"
+LOGDIR="${LOGDIR:-$PROJECT_ROOT/results/logs_eval}"
 RECURSIVE="${RECURSIVE:-0}"
 
 cd "$WORKDIR"

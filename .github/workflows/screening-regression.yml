@@ -17,4 +17,4 @@ jobs:
       - run: python -m pip install -r requirements-screening-test.txt
       - run: python -m pytest -q tests/
       - run: node --check mattergen_webapp/frontend/app.js
-      - run: bash -n mattergen_webapp/scripts/dd.sh mattergen_webapp/scripts/run_full_pipeline_hpc.sh
+      - run: bash -n workflow/pipeline/generate.sh workflow/pipeline/evaluate.sh workflow/pipeline/run_full_pipeline.sh mattergen_webapp/container/build_image.sh mattergen_webapp/hpc/slurm_full_pipeline.sbatch

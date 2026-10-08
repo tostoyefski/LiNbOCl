@@ -102,15 +102,18 @@ def summarize(atoms):
 
 
 
+DEFAULT_RESULTS = Path(__file__).resolve().parents[2] / "results" / "top300_run"
+
+
 def main():
 
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--refs", type=str, default="top150_refs.txt",
+    ap.add_argument("--refs", type=str, default=str(DEFAULT_RESULTS / "top300_refs.txt"),
 
                     help="包含 path::frame 的列表（每行一个）")
 
-    ap.add_argument("--outdir", type=str, default="exported_cifs",
+    ap.add_argument("--outdir", type=str, default=str(DEFAULT_RESULTS / "exported_300cifs"),
 
                     help="导出目录（不存在将创建）")
 
