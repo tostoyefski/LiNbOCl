@@ -1,10 +1,8 @@
 # LiNbOCl / MatterGen 材料生成项目
 
 本仓库保存本机项目的纯代码快照，包含 `mattergen/` 核心项目和 `mattergen_webapp/` Web 控制台。
-历史运行结果、分析报告与图表、轨迹、日志、模型权重、数据集、虚拟环境和 API 密钥不在仓库中。
-核心项目的原始许可证、NOTICE 和说明保存在 `mattergen/` 中。二进制测试样本也未上传，需要运行相关测试时另行准备。
-
-## 在另一台机器上下载并运行
+核心项目的原始许可证、NOTICE 和说明保存在 `mattergen/` 中。
+## 下载并运行
 
 ```bash
 git clone https://github.com/tostoyefski/LiNbOCl.git
@@ -31,4 +29,4 @@ uvicorn main:app --app-dir backend --host 0.0.0.0 --port 8000
 - [GPU 容器部署](mattergen_webapp/container/README_CONTAINER.md)
 - [HPC / Slurm 部署](mattergen_webapp/hpc/README_HPC.md)
 
-本地原项目与运行结果保持原样。此仓库使用新的提交历史，避免上传旧提交中的计算结果。
+
