@@ -115,7 +115,7 @@ function bindForms() {
       chemical_systems: chemSystems.length ? chemSystems : null,
       chemical_systems_file: f.chemical_systems_file.value || null,
       elements,
-      combo_sizes: comboSizes.length ? comboSizes : [3],
+      combo_sizes: comboSizes.length ? comboSizes : [4],
     };
     await submitJob("dd.sh", `${apiBase}/run/dd`, payload, btn);
   });
@@ -141,6 +141,9 @@ function bindForms() {
       refs_out: f.refs_out.value,
       require_charge_balance: f.require_charge_balance.checked,
       use_smact: f.use_smact.checked,
+      filter_light_oxy: f.filter_light_oxy.checked,
+      required_elements: splitList(f.required_elements.value),
+      allowed_elements: splitList(f.allowed_elements.value).length ? splitList(f.allowed_elements.value) : null,
     };
     await submitJob("screen_all_extxyz.py", `${apiBase}/run/screen`, payload, btn);
   });
@@ -153,6 +156,7 @@ function bindForms() {
       stage2_csv: f.stage2_csv.value,
       output_dir: f.output_dir.value,
       topk: Number(f.topk.value),
+      selection_mode: f.selection_mode.value,
       refs_out: f.refs_out.value,
       export_dir: f.export_dir.value,
       export_prefix: f.export_prefix.value,
@@ -160,6 +164,8 @@ function bindForms() {
       ehull_threshold: Number(f.ehull_threshold.value),
       voltage_step: f.voltage_step.value ? Number(f.voltage_step.value) : null,
       voltage_threshold: Number(f.voltage_threshold.value),
+      target_voltage: f.target_voltage.value.trim() ? Number(f.target_voltage.value) : null,
+      min_voltage_window: Number(f.min_voltage_window.value),
       dry_run: f.dry_run.checked,
     };
     await submitJob("run_top300_pipeline.py", `${apiBase}/run/top300`, payload, btn);
@@ -377,7 +383,7 @@ function buildFullPayload() {
       chemical_systems: chemSystems.length ? chemSystems : null,
       chemical_systems_file: fd.chemical_systems_file.value || null,
       elements,
-      combo_sizes: comboSizes.length ? comboSizes : [3],
+      combo_sizes: comboSizes.length ? comboSizes : [4],
     },
     eval: { root: fe.root.value },
     screen: {
@@ -390,11 +396,15 @@ function buildFullPayload() {
       refs_out: fs.refs_out.value,
       require_charge_balance: fs.require_charge_balance.checked,
       use_smact: fs.use_smact.checked,
+      filter_light_oxy: fs.filter_light_oxy.checked,
+      required_elements: splitList(fs.required_elements.value),
+      allowed_elements: splitList(fs.allowed_elements.value).length ? splitList(fs.allowed_elements.value) : null,
     },
     top300: {
       stage2_csv: ft.stage2_csv.value,
       output_dir: ft.output_dir.value,
       topk: Number(ft.topk.value),
+      selection_mode: ft.selection_mode.value,
       refs_out: ft.refs_out.value,
       export_dir: ft.export_dir.value,
       export_prefix: ft.export_prefix.value,
@@ -402,6 +412,8 @@ function buildFullPayload() {
       ehull_threshold: Number(ft.ehull_threshold.value),
       voltage_step: ft.voltage_step.value ? Number(ft.voltage_step.value) : null,
       voltage_threshold: Number(ft.voltage_threshold.value),
+      target_voltage: ft.target_voltage.value.trim() ? Number(ft.target_voltage.value) : null,
+      min_voltage_window: Number(ft.min_voltage_window.value),
       dry_run: ft.dry_run.checked,
     },
     num_batches: numBatches,

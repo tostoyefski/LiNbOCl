@@ -14,7 +14,7 @@ MODEL_NAME="${MODEL_NAME:-chemical_system_energy_above_hull}"
 CHEMICAL_SYSTEMS="${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}"
 CHEMICAL_SYSTEMS_FILE="${CHEMICAL_SYSTEMS_FILE:-}"
 ELEMENTS="${ELEMENTS:-}"
-COMBO_SIZES="${COMBO_SIZES:-3}"
+COMBO_SIZES="${COMBO_SIZES:-4}"
 
 BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_BATCHES_PER_SEGMENT="${NUM_BATCHES_PER_SEGMENT:-20}"
@@ -29,6 +29,13 @@ SUPERCELL="${SUPERCELL:-2 2 2}"
 LIGHT_OXY="${LIGHT_OXY:-0.05 0.35}"
 REQUIRE_CHARGE_BALANCE="${REQUIRE_CHARGE_BALANCE:-1}"
 USE_SMACT="${USE_SMACT:-1}"
+REQUIRED_ELEMENTS="${REQUIRED_ELEMENTS:-Li Nb O Cl}"
+ALLOWED_ELEMENTS="${ALLOWED_ELEMENTS-Li Nb O Cl}"
+FILTER_LIGHT_OXY="${FILTER_LIGHT_OXY:-1}"
+SELECTION_MODE="${SELECTION_MODE:-diverse}"
+VOLTAGE_THRESHOLD="${VOLTAGE_THRESHOLD:-0.001}"
+TARGET_VOLTAGE="${TARGET_VOLTAGE:-}"
+MIN_VOLTAGE_WINDOW="${MIN_VOLTAGE_WINDOW:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
 export TMPDIR="$RUNTIME_ROOT/tmp"
@@ -93,17 +100,30 @@ screen_cmd=(
   --workdir "$MATTERGEN_ROOT"
   --base "$SEGMENTS_ROOT"
   --out "$RESULTS_ROOT/stage2_candidates.csv"
+  --screened-out "$RESULTS_ROOT/screened_out.csv"
   --r-cut "$R_CUT"
   --super $SUPERCELL
-  --light-oxy $LIGHT_OXY
+  --required-elements $REQUIRED_ELEMENTS
   --topk "$SCREEN_TOPK"
   --refs-out "$RESULTS_ROOT/top300_refs.txt"
 )
 if [[ "$REQUIRE_CHARGE_BALANCE" == "1" || "$REQUIRE_CHARGE_BALANCE" == "true" ]]; then
   screen_cmd+=(--require-charge-balance)
+else
+  screen_cmd+=(--no-charge-balance)
 fi
 if [[ "$USE_SMACT" == "1" || "$USE_SMACT" == "true" ]]; then
   screen_cmd+=(--use-smact)
+else
+  screen_cmd+=(--no-smact)
+fi
+if [[ -n "$ALLOWED_ELEMENTS" ]]; then
+  screen_cmd+=(--allowed-elements $ALLOWED_ELEMENTS)
+fi
+if [[ "$FILTER_LIGHT_OXY" == "1" || "$FILTER_LIGHT_OXY" == "true" ]]; then
+  screen_cmd+=(--light-oxy $LIGHT_OXY)
+else
+  screen_cmd+=(--no-light-oxy)
 fi
 
 echo "==== Unified screen_all_extxyz.py ===="
@@ -115,6 +135,7 @@ top_cmd=(
   --output-dir "$RESULTS_ROOT/top300_run"
   --stage2-csv "$RESULTS_ROOT/stage2_candidates.csv"
   --topk "$TOPK"
+  --selection-mode "$SELECTION_MODE"
   --refs-out "$RESULTS_ROOT/top300_run/top300_refs.txt"
   --export-dir "$RESULTS_ROOT/top300_run/exported_300cifs"
   --export-prefix cand300
@@ -123,8 +144,12 @@ top_cmd=(
   --ehull-out "$RESULTS_ROOT/top300_run/chgnet_hull_top300.csv"
   --filtered-out "$RESULTS_ROOT/top300_run/chgnet_hull_top300_filtered.csv"
   --voltage-out "$RESULTS_ROOT/top300_run/chgnet_voltage_window_top300.csv"
-  --voltage-threshold 0.05
+  --voltage-threshold "$VOLTAGE_THRESHOLD"
+  --min-voltage-window "$MIN_VOLTAGE_WINDOW"
 )
+if [[ -n "$TARGET_VOLTAGE" ]]; then
+  top_cmd+=(--target-voltage "$TARGET_VOLTAGE")
+fi
 if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
   top_cmd+=(--dry-run)
 fi

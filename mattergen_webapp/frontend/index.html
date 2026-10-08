@@ -45,10 +45,10 @@
           <label>NUM_BATCHES（连续采样批次数）<input name="num_batches" type="number" value="1" min="1"></label>
           <label>E_AH (能量余度)<input name="e_ah" type="number" step="0.01" value="0.05"></label>
           <label>GUIDANCE (扩散引导)<input name="guidance" type="number" step="0.1" value="2.0"></label>
-          <label>CHEMICAL_SYSTEMS（优先使用，逗号或空格分隔）<input name="chemical_systems" placeholder="Li-Fe-O, Li-Zr-Cl-Br"></label>
+          <label>CHEMICAL_SYSTEMS（优先使用，逗号或空格分隔）<input name="chemical_systems" value="Li-Nb-O-Cl" placeholder="Li-Fe-O, Li-Zr-Cl-Br"></label>
           <label>CHEMICAL_SYSTEMS_FILE（可选，路径）<input name="chemical_systems_file" placeholder="/path/to/systems.txt"></label>
-          <label>ELEMENTS（用于自动组合，空格/逗号分隔）<input name="elements" value="Li Y Cl Br O"></label>
-          <label>COMBO_SIZES（组合大小，空格分隔）<input name="combo_sizes" value="3"></label>
+          <label>ELEMENTS（用于自动组合，空格/逗号分隔）<input name="elements" value="Li Nb O Cl"></label>
+          <label>COMBO_SIZES（组合大小，空格分隔）<input name="combo_sizes" value="4"></label>
           <button type="submit">运行 dd.sh</button>
           <p class="small-hint">若未指定 CHEMICAL_SYSTEMS，会用 ELEMENTS 按 COMBO_SIZES 自动生成组合；NUM_BATCHES 控制 mattergen-generate 连续采样批次数；输出位于 <code>BASE_RESULTS_DIR/化学系统</code>。</p>
         </form>
@@ -75,7 +75,7 @@
             <p class="eyebrow">快筛</p>
             <h2>screen_all_extxyz.py</h2>
           </div>
-          <span class="chip accent">Li 连通 + 组成</span>
+          <span class="chip accent">周期贯通 + 化学规则</span>
         </div>
         <form id="form-screen" class="form-grid">
           <label>base<input name="base" value="/mnt/e/mattergen_runs/results200"></label>
@@ -83,14 +83,17 @@
           <label>r_cut (Å)<input name="r_cut" type="number" step="0.1" value="3.0"></label>
           <label>supercell 3 元（空格分隔）<input name="supercell" value="2 2 2"></label>
           <label>light_oxy 区间<input name="light_oxy" value="0.05 0.35"></label>
+          <label>必需元素（空格分隔）<input name="required_elements" value="Li Nb O Cl" required></label>
+          <label>允许元素（留空不限）<input name="allowed_elements" value="Li Nb O Cl"></label>
           <label>topk（导出引用数量）<input name="topk" type="number" value="150"></label>
           <label>refs_out<input name="refs_out" value="top150_refs.txt"></label>
           <div class="toggle-row">
-            <label><input type="checkbox" name="require_charge_balance"> 电中性筛</label>
-            <label><input type="checkbox" name="use_smact"> 启用 SMACT</label>
+            <label><input type="checkbox" name="require_charge_balance" checked> 电中性筛</label>
+            <label><input type="checkbox" name="use_smact" checked> 启用 SMACT</label>
+            <label><input type="checkbox" name="filter_light_oxy" checked> 按氧比例区间过滤</label>
           </div>
           <button type="submit">运行 screen_all_extxyz.py</button>
-          <p class="small-hint">完成后会生成 stage2_candidates.csv / top150_refs.txt，并按 quick_score 排序。</p>
+          <p class="small-hint">通过化学规则后输出 stage2_candidates.csv；拒绝原因写入 screened_out.csv。周期贯通分数用于几何预筛，电导率需另行验证。</p>
         </form>
       </article>
 
@@ -106,16 +109,19 @@
           <label>stage2_csv<input name="stage2_csv" value="/mnt/e/mattergen_runs/results200/stage2_candidates.csv"></label>
           <label>output_dir（统一输出）<input name="output_dir" value="/mnt/e/mattergen_runs/results200/top300_run"></label>
           <label>topk<input name="topk" type="number" value="300"></label>
+          <label>选择方式<select name="selection_mode"><option value="diverse">去重后按组成轮选</option><option value="score">去重后按几何分排序</option></select></label>
           <label>refs_out<input name="refs_out" value="top300_refs.txt"></label>
           <label>export_dir<input name="export_dir" value="/mnt/e/mattergen_runs/results200/top300_run/exported_300cifs"></label>
           <label>export_prefix<input name="export_prefix" value="cand300"></label>
           <label>export_index_name<input name="export_index_name" value="export_300index.csv"></label>
           <label>ehull_threshold<input name="ehull_threshold" type="number" step="0.01" value="0.05"></label>
           <label>voltage_step (可空)<input name="voltage_step" type="number" step="0.1" placeholder="留空使用默认"></label>
-          <label>voltage_threshold<input name="voltage_threshold" type="number" step="0.01" value="0.05"></label>
+          <label>电压窗能量容差（eV/非 Li 原子）<input name="voltage_threshold" type="number" min="0" step="0.001" value="0.001"></label>
+          <label>目标电压（V，vs Li/Li⁺，可空）<input name="target_voltage" type="number" step="0.05" placeholder="例如 4.0"></label>
+          <label>最小已验证窗口宽度（V）<input name="min_voltage_window" type="number" min="0" step="0.05" value="0"></label>
           <label class="toggle-row"><input type="checkbox" name="dry_run"> dry-run（跳过 CHGNet/MP）</label>
           <button type="submit">运行 run_top300_pipeline.py</button>
-          <p class="small-hint">需已安装 CHGNet / MP API。dry-run 仅导出 refs & CIF。</p>
+          <p class="small-hint">先去重再选 Top-K。最终候选需通过凸包和电压筛选；目标电压留空时要求存在非零稳定区间。dry-run 导出选择审计、refs 和 CIF。</p>
         </form>
       </article>
     </section>

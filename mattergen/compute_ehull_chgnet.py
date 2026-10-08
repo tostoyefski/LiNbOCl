@@ -8,6 +8,8 @@ and reports the energy above hull (ΔE_hull) together with a stability flag.
 python compute_ehull_chgnet.py --cif-dir results/exported_cifs --out chgnet_hull_results.csv
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import math
@@ -18,9 +20,6 @@ from pathlib import Path
 from time import sleep
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from chgnet.model import CHGNet
-from mp_api.client import MPRester
-from mp_api.client.core.client import MPRestError
 from pymatgen.analysis.phase_diagram import PhaseDiagram, PDEntry
 from pymatgen.core import Structure
 
@@ -32,6 +31,8 @@ def parse_args() -> argparse.Namespace:
         default="results/exported_cifs",
         help="Directory containing CIF files to evaluate.",
     )
+    parser.add_argument("--cif-index", type=Path, default=None,
+                        help="Optional export index CSV; evaluate only its CIF files, excluding stale exports.")
     parser.add_argument(
         "--out",
         default="chgnet_hull_results.csv",
@@ -69,12 +70,27 @@ def get_energy_per_atom(pred: Dict) -> float:
     raise KeyError("CHGNet prediction does not contain an energy per atom.")
 
 
-def load_candidate_structures(cif_dir: Path) -> List[Tuple[Path, Structure]]:
+def load_candidate_structures(cif_dir: Path, index_csv: Path | None = None) -> List[Tuple[Path, Structure]]:
     structures: List[Tuple[Path, Structure]] = []
-    for path in sorted(cif_dir.glob("*.cif")):
+    if index_csv is None:
+        paths = sorted(cif_dir.glob("*.cif"))
+    else:
+        with index_csv.open(newline="") as fh:
+            reader = csv.DictReader(fh)
+            if "cif" not in (reader.fieldnames or []):
+                raise ValueError("Export index must contain a cif column")
+            paths = [Path(row["cif"]).expanduser().resolve() for row in reader]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Export index contains duplicate CIF paths")
+        for path in paths:
+            if path.parent != cif_dir.resolve() or path.suffix.lower() != ".cif" or not path.is_file():
+                raise ValueError(f"Invalid CIF path in export index: {path}")
+    for path in paths:
         try:
             structures.append((path, Structure.from_file(path)))
         except Exception as exc:
+            if index_csv is not None:
+                raise ValueError(f"Selected CIF could not be read: {path}") from exc
             print(f"[WARN] Failed to load {path}: {exc}")
     return structures
 
@@ -84,6 +100,7 @@ def chem_system(struct: Structure) -> str:
 
 
 def search_with_retry(mpr: MPRester, **kwargs):
+    from mp_api.client.core.client import MPRestError
     last_exc: Optional[Exception] = None
     for attempt in range(3):
         try:
@@ -94,6 +111,12 @@ def search_with_retry(mpr: MPRester, **kwargs):
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("search_with_retry failed without raising MPRestError")
+
+
+def doc_get(doc, key: str, default=None):
+    if isinstance(doc, dict):
+        return doc.get(key, default)
+    return getattr(doc, key, default)
 
 
 def fetch_mp_competitor_structures(
@@ -108,10 +131,10 @@ def fetch_mp_competitor_structures(
     def add_docs(docs: Iterable) -> None:
         nonlocal collected
         for doc in docs:
-            mid = getattr(doc, "material_id", None)
+            mid = doc_get(doc, "material_id")
             if mid in seen:
                 continue
-            struct = getattr(doc, "structure", None)
+            struct = doc_get(doc, "structure")
             if struct is None:
                 continue
             collected.append(struct)
@@ -126,7 +149,7 @@ def fetch_mp_competitor_structures(
             chemsys=el,
             fields=["material_id", "structure", "is_stable"],
         )
-        pick = next((d for d in docs if getattr(d, "is_stable", False)), docs[0] if docs else None)
+        pick = next((d for d in docs if doc_get(d, "is_stable", False)), docs[0] if docs else None)
         if pick is not None:
             add_docs([pick])
         if limit is not None and len(collected) >= limit:
@@ -141,8 +164,8 @@ def fetch_mp_competitor_structures(
                 chemsys=[sub_csys],
                 fields=["material_id", "structure", "is_stable"],
             )
-            stable = [d for d in docs if getattr(d, "is_stable", False)]
-            others = [d for d in docs if not getattr(d, "is_stable", False)]
+            stable = [d for d in docs if doc_get(d, "is_stable", False)]
+            others = [d for d in docs if not doc_get(d, "is_stable", False)]
             add_docs(stable + others)
             if limit is not None and len(collected) >= limit:
                 return collected
@@ -167,6 +190,8 @@ def structures_to_entries(structs: Iterable[Structure], model: CHGNet) -> List[P
 
 
 def main() -> None:
+    from chgnet.model import CHGNet
+    from mp_api.client import MPRester
     args = parse_args()
 
     if not args.mp_api_key:
@@ -176,7 +201,7 @@ def main() -> None:
     if not cif_dir.is_dir():
         raise SystemExit(f"CIF directory not found: {cif_dir}")
 
-    candidates = load_candidate_structures(cif_dir)
+    candidates = load_candidate_structures(cif_dir, args.cif_index)
     if not candidates:
         raise SystemExit(f"No CIF files found in {cif_dir}")
 
@@ -219,7 +244,9 @@ def main() -> None:
 
     results: List[Dict] = []
 
-    with MPRester(api_key=args.mp_api_key) as mpr:
+    # Materials Project now returns alphanumeric material ids such as
+    # mp-aaaaaaft, which older pydantic document models reject.
+    with MPRester(api_key=args.mp_api_key, use_document_model=False) as mpr:
         for csys, my_entries in grouped_entries.items():
             print(f"[INFO] Processing chemical system {csys} ({len(my_entries)} candidates)")
             mp_structs = fetch_mp_competitor_structures(csys, mpr, args.max_mp_competitors)

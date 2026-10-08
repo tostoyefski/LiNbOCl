@@ -10,7 +10,7 @@
 #   CHEMICAL_SYSTEMS      逗号/空白分隔的化学系统列表（如：Li-Fe-O,Li-Fe-F）
 #   CHEMICAL_SYSTEMS_FILE 文件形式的一行一个化学系统列表（# 开头行忽略）
 #   ELEMENTS              若未显式给定化学系统，用此元素集合自动组合
-#   COMBO_SIZES           自动组合的大小列表（空白分隔，默认 3，例如：3 或 "3 4"）
+#   COMBO_SIZES           自动组合的大小列表（空白分隔，默认 4，例如：3 或 "3 4"）
 #   WORKDIR               执行目录（默认当前目录，可设为 mattergen 仓库根）
 
 set -euo pipefail
@@ -22,8 +22,8 @@ E_AH="${E_AH:-0.05}"
 GUIDANCE="${GUIDANCE:-2.0}"
 CHEMICAL_SYSTEMS="${CHEMICAL_SYSTEMS:-}"
 CHEMICAL_SYSTEMS_FILE="${CHEMICAL_SYSTEMS_FILE:-}"
-ELEMENTS="${ELEMENTS:-Li Y Cl Br O}"
-COMBO_SIZES="${COMBO_SIZES:-3}"
+ELEMENTS="${ELEMENTS:-Li Nb O Cl}"
+COMBO_SIZES="${COMBO_SIZES:-4}"
 NUM_BATCHES="${NUM_BATCHES:-${num_batches:-1}}"
 WORKDIR="${WORKDIR:-$(pwd)}"
 
@@ -34,33 +34,33 @@ echo "[info] BASE_RESULTS_DIR=$BASE_RESULTS_DIR"
 echo "[info] BATCH_SIZE=$BATCH_SIZE NUM_BATCHES=$NUM_BATCHES GUIDANCE=$GUIDANCE E_AH=$E_AH"
 echo "[info] WORKDIR=$WORKDIR"
 
-mapfile -t SYSTEMS < <(
-  # 优先使用显式列表
-  if [[ -n "$CHEMICAL_SYSTEMS" ]]; then
-    tr ',;' '\n' <<<"$CHEMICAL_SYSTEMS"
-  fi
+# Read in the current shell so generated combinations populate SYSTEMS too.
+# A read loop also works with Bash 3.2 (mapfile requires Bash 4).
+SYSTEMS=()
+while IFS= read -r cs; do
+  [[ -n "$cs" ]] && SYSTEMS+=("$cs")
+done < <(python - "$CHEMICAL_SYSTEMS" "$CHEMICAL_SYSTEMS_FILE" "$ELEMENTS" "$COMBO_SIZES" <<'PY_SYSTEMS'
+import itertools
+import pathlib
+import re
+import sys
 
-  # 从文件读取
-  if [[ -n "$CHEMICAL_SYSTEMS_FILE" && -f "$CHEMICAL_SYSTEMS_FILE" ]]; then
-    sed 's/#.*$//' "$CHEMICAL_SYSTEMS_FILE" | sed '/^[[:space:]]*$/d'
-  fi
+explicit, filename, elements_text, sizes_text = sys.argv[1:]
+systems = re.split(r"[,;\s]+", explicit.strip()) if explicit.strip() else []
+if filename:
+    for line in pathlib.Path(filename).read_text().splitlines():
+        systems.extend(re.split(r"[,;\s]+", line.split("#", 1)[0].strip()))
+systems = [s for s in systems if s]
+if not systems:
+    elements = list(dict.fromkeys(re.split(r"[,;\s]+", elements_text.strip())))
+    sizes = [int(n) for n in sizes_text.split()]
+    if not elements or any(not 1 <= n <= len(elements) for n in sizes):
+        raise ValueError("COMBO_SIZES must be between 1 and the number of elements")
+    systems = ["-".join(combo) for size in sizes for combo in itertools.combinations(elements, size)]
+for system in dict.fromkeys(systems):
+    print(system)
+PY_SYSTEMS
 )
-
-if [[ ${#SYSTEMS[@]} -eq 0 ]]; then
-  # 自动组合元素
-  python - "$ELEMENTS" "$COMBO_SIZES" <<'PY'
-import sys, itertools
-elements = sys.argv[1].replace(",", " ").split()
-sizes = [int(x) for x in sys.argv[2].split()]
-seen = set()
-for k in sizes:
-    for combo in itertools.combinations(elements, k):
-        cs = "-".join(combo)
-        if cs not in seen:
-            seen.add(cs)
-            print(cs)
-PY
-fi
 
 if [[ ${#SYSTEMS[@]} -eq 0 ]]; then
   echo "[error] 没有可用的化学系统（请设置 CHEMICAL_SYSTEMS 或 ELEMENTS/COMBO_SIZES）"

@@ -14,6 +14,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import math
 import signal
 import subprocess
 import threading
@@ -23,7 +24,7 @@ from collections import deque
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 import base64
 import io
 
@@ -226,8 +227,8 @@ class GenerateRequest(BaseModel):
     num_batches: int = Field(1, ge=1, description="mattergen-generate --num_batches")
     e_ah: float = 0.05
     guidance: float = 2.0
-    elements: List[str] = Field(default_factory=lambda: ["Li", "Y", "Cl", "Br", "O"], description="元素集合，用于自动组合")
-    combo_sizes: List[int] = Field(default_factory=lambda: [3], description="组合大小（可多选）")
+    elements: List[str] = Field(default_factory=lambda: ["Li", "Nb", "O", "Cl"], description="元素集合，用于自动组合")
+    combo_sizes: List[int] = Field(default_factory=lambda: [4], description="组合大小（可多选）")
     chemical_systems: Optional[List[str]] = Field(default=None, description="显式化学系统列表，逗号或数组")
     chemical_systems_file: Optional[str] = Field(default=None, description="化学系统文件路径，一行一个")
 
@@ -239,42 +240,78 @@ class EvalRequest(BaseModel):
 class ScreenRequest(BaseModel):
     base: str = "results/chemical_system_energy_above_hull"
     out: str = "results/stage2_candidates.csv"
-    r_cut: float = 3.0
+    r_cut: float = Field(3.0, gt=0)
     supercell: List[int] = Field(default_factory=lambda: [2, 2, 2], min_items=3, max_items=3)
     light_oxy: List[float] = Field(default_factory=lambda: [0.05, 0.35], min_items=2, max_items=2)
-    require_charge_balance: bool = False
-    use_smact: bool = False
-    topk: int = 150
+    filter_light_oxy: bool = True
+    required_elements: List[str] = Field(default_factory=lambda: ["Li", "Nb", "O", "Cl"])
+    allowed_elements: Optional[List[str]] = Field(default_factory=lambda: ["Li", "Nb", "O", "Cl"])
+    require_charge_balance: bool = True
+    use_smact: bool = True
+    topk: int = Field(150, ge=1)
     refs_out: str = "top150_refs.txt"
 
     @validator("supercell")
     def _super_len(cls, v: List[int]) -> List[int]:
-        if len(v) != 3:
-            raise ValueError("supercell must have 3 integers")
+        if len(v) != 3 or any(x < 1 for x in v):
+            raise ValueError("supercell must have 3 positive integers")
         return v
 
     @validator("light_oxy")
     def _light_len(cls, v: List[float]) -> List[float]:
-        if len(v) != 2:
-            raise ValueError("light_oxy expects [low, high]")
+        if len(v) != 2 or not all(math.isfinite(x) for x in v) or not 0 <= v[0] <= v[1] <= 1:
+            raise ValueError("light_oxy expects 0 <= low <= high <= 1")
         return v
+
+    @validator("r_cut")
+    def _finite_cutoff(cls, v):
+        if not math.isfinite(v):
+            raise ValueError("r_cut must be finite")
+        return v
+
+    @validator("required_elements")
+    def _required_elements(cls, v):
+        if not v or "Li" not in v:
+            raise ValueError("required_elements must include Li")
+        if any(not re.fullmatch(r"[A-Z][a-z]?", el) for el in v):
+            raise ValueError("required_elements must contain element symbols")
+        return list(dict.fromkeys(v))
+
+    @validator("allowed_elements", always=True)
+    def _allowed_elements(cls, v, values):
+        if v is None:
+            return v
+        if not v or any(not re.fullmatch(r"[A-Z][a-z]?", el) for el in v):
+            raise ValueError("allowed_elements must contain element symbols or be null")
+        if not set(values.get("required_elements", [])).issubset(v):
+            raise ValueError("allowed_elements must contain every required element")
+        return list(dict.fromkeys(v))
 
 
 class Top300Request(BaseModel):
     stage2_csv: str = "results/stage2_candidates.csv"
-    topk: int = 300
+    topk: int = Field(300, ge=1)
+    selection_mode: Literal["diverse", "score"] = "diverse"
     refs_out: str = "top300_refs.txt"
     output_dir: Optional[str] = None
     export_dir: str = "results/exported_300cifs"
     export_prefix: str = "cand300"
     export_index_name: str = "export_300index.csv"
-    ehull_threshold: float = 0.05
+    ehull_threshold: float = Field(0.05, ge=0)
     ehull_out: Optional[str] = None
     filtered_out: Optional[str] = None
     voltage_out: Optional[str] = None
-    voltage_step: Optional[float] = None
-    voltage_threshold: float = 0.05
+    voltage_step: Optional[float] = Field(None, gt=0)
+    voltage_threshold: float = Field(1e-3, ge=0)
+    target_voltage: Optional[float] = None
+    min_voltage_window: float = Field(0.0, ge=0)
     dry_run: bool = False
+
+    @validator("ehull_threshold", "voltage_step", "voltage_threshold", "target_voltage", "min_voltage_window")
+    def _finite_values(cls, v):
+        if v is not None and not math.isfinite(v):
+            raise ValueError("screening thresholds and voltages must be finite")
+        return v
 
 
 class FullPipelineRequest(BaseModel):
@@ -377,8 +414,6 @@ def run_screen(payload: ScreenRequest):
         str(payload.r_cut),
         "--super",
         *(str(x) for x in payload.supercell),
-        "--light-oxy",
-        *(str(x) for x in payload.light_oxy),
         "--topk",
         str(payload.topk),
         "--refs-out",
@@ -386,8 +421,20 @@ def run_screen(payload: ScreenRequest):
     ]
     if payload.require_charge_balance:
         cmd.append("--require-charge-balance")
+    else:
+        cmd.append("--no-charge-balance")
     if payload.use_smact:
         cmd.append("--use-smact")
+    else:
+        cmd.append("--no-smact")
+    if payload.filter_light_oxy:
+        cmd.extend(["--light-oxy", *(str(x) for x in payload.light_oxy)])
+    else:
+        cmd.append("--no-light-oxy")
+    cmd.extend(["--screened-out", str(Path(payload.out).with_name("screened_out.csv"))])
+    cmd.extend(["--required-elements", *payload.required_elements])
+    if payload.allowed_elements:
+        cmd.extend(["--allowed-elements", *payload.allowed_elements])
     job = launch_job("screen", cmd, params=payload.dict())
     return job
 
@@ -406,6 +453,8 @@ def run_top300(payload: Top300Request):
         payload.stage2_csv,
         "--topk",
         str(payload.topk),
+        "--selection-mode",
+        payload.selection_mode,
         "--refs-out",
         payload.refs_out,
         "--export-dir",
@@ -428,7 +477,11 @@ def run_top300(payload: Top300Request):
     cmd += [
         "--voltage-threshold",
         str(payload.voltage_threshold),
+        "--min-voltage-window",
+        str(payload.min_voltage_window),
     ]
+    if payload.target_voltage is not None:
+        cmd.extend(["--target-voltage", str(payload.target_voltage)])
     if payload.dry_run:
         cmd.append("--dry-run")
     job = launch_job("top300", cmd, params=payload.dict())
@@ -499,16 +552,16 @@ def run_full(payload: FullPipelineRequest):
         env_prefix = " ".join([f"{k}={_quote(str(v))}" for k, v in dd_env.items()])
 
         script_lines += [
-            f"echo '==== Generate segment {batch_no}/{batches}: dd.sh -> {run_base} ===='",
-            f"{env_prefix} bash {str(ensure_script('dd.sh'))}",
+            f"echo {_quote(f'Generate segment {batch_no}/{batches}: dd.sh -> {run_base}')}",
+            f"{env_prefix} bash {_quote(str(ensure_script('dd.sh')))}",
         ]
 
     manifest_path = base_results / "full_pipeline_segments.txt"
     script_lines += [
-        f"echo '==== Merge generated segments -> {segments_root} ===='",
+        f"echo {_quote(f'Merge generated segments -> {segments_root}')}",
         f"mkdir -p {_quote(str(base_results))}",
         f"printf '%s\\n' {' '.join(_quote(str(p)) for p in run_bases)} > {_quote(str(manifest_path))}",
-        f"echo '[info] Segment manifest: {manifest_path}'",
+        f"echo {_quote(f'[info] Segment manifest: {manifest_path}')}",
     ]
 
     eval_root = str(segments_root)
@@ -532,8 +585,6 @@ def run_full(payload: FullPipelineRequest):
         str(screen.r_cut),
         "--super",
         *(str(x) for x in screen.supercell),
-        "--light-oxy",
-        *(str(x) for x in screen.light_oxy),
         "--topk",
         str(screen.topk),
         "--refs-out",
@@ -541,8 +592,20 @@ def run_full(payload: FullPipelineRequest):
     ]
     if screen.require_charge_balance:
         screen_cmd.append("--require-charge-balance")
+    else:
+        screen_cmd.append("--no-charge-balance")
     if screen.use_smact:
         screen_cmd.append("--use-smact")
+    else:
+        screen_cmd.append("--no-smact")
+    if screen.filter_light_oxy:
+        screen_cmd.extend(["--light-oxy", *(str(x) for x in screen.light_oxy)])
+    else:
+        screen_cmd.append("--no-light-oxy")
+    screen_cmd.extend(["--screened-out", str(Path(screen_out).with_name("screened_out.csv"))])
+    screen_cmd.extend(["--required-elements", *screen.required_elements])
+    if screen.allowed_elements:
+        screen_cmd.extend(["--allowed-elements", *screen.allowed_elements])
 
     top = payload.top300
     top_stage2 = screen_out
@@ -586,6 +649,8 @@ def run_full(payload: FullPipelineRequest):
         top_stage2,
         "--topk",
         str(top.topk),
+        "--selection-mode",
+        top.selection_mode,
         "--refs-out",
         top_refs_out,
         "--export-dir",
@@ -604,7 +669,11 @@ def run_full(payload: FullPipelineRequest):
         top_voltage_out,
         "--voltage-threshold",
         str(top.voltage_threshold),
+        "--min-voltage-window",
+        str(top.min_voltage_window),
     ]
+    if top.target_voltage is not None:
+        top_cmd.extend(["--target-voltage", str(top.target_voltage)])
     if top.voltage_step is not None:
         top_cmd.extend(["--voltage-step", str(top.voltage_step)])
     if top.dry_run:
@@ -612,11 +681,11 @@ def run_full(payload: FullPipelineRequest):
 
     script_lines += [
         "echo '==== Unified eval_all.sh over generated segments ===='",
-        f"ROOT={_quote(eval_root)} WORKDIR={_quote(str(MATTERGEN_ROOT))} LOGDIR={_quote(eval_log_dir)} RECURSIVE=1 bash {str(ensure_script('eval_all.sh'))}",
+        f"ROOT={_quote(eval_root)} WORKDIR={_quote(str(MATTERGEN_ROOT))} LOGDIR={_quote(eval_log_dir)} RECURSIVE=1 bash {_quote(str(ensure_script('eval_all.sh')))}",
         "echo '==== Unified screen_all_extxyz.py over all relaxed structures ===='",
-        " ".join(screen_cmd),
+        " ".join(_quote(x) for x in screen_cmd),
         "echo '==== Global run_top300_pipeline.py from unified stage2 CSV ===='",
-        " ".join(top_cmd),
+        " ".join(_quote(x) for x in top_cmd),
     ]
 
     full_cmd = ["bash", "-c", "\n".join(script_lines)]
