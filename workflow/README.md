@@ -25,7 +25,7 @@ CHEMICAL_SYSTEMS='Li-Nb-O-Cl' \
   bash workflow/pipeline/run_full_pipeline.sh
 ```
 
-顺序为分段生成、统一评估、化学筛选、结构去重与多样性选择、CIF 导出、候选与 MP 竞争结构统一 MatterSim 优化、CHGNet 能量及体相凸包筛选、电压筛选。生成数量约为 `BATCH_SIZE × NUM_BATCHES_PER_SEGMENT × SEGMENTS`。`DRY_RUN=1` 仍会生成和评估，随后止于去重与 CIF 导出；仅检查已有结构时使用下一节。
+顺序为分段生成、统一评估、化学筛选、结构去重与多样性选择、CIF 导出、候选与 MP 竞争结构统一 MatterSim 优化、CHGNet 能量及体相凸包筛选、电压筛选、训练集及参考集结构新颖性筛选。生成数量约为 `BATCH_SIZE × NUM_BATCHES_PER_SEGMENT × SEGMENTS`。`DRY_RUN=1` 仍会生成和评估，随后止于去重与 CIF 导出；仅检查已有结构时使用下一节。
 
 常用环境参数如下：
 
@@ -40,6 +40,9 @@ CHEMICAL_SYSTEMS='Li-Nb-O-Cl' \
 | `MATTERSIM_CHECKPOINT` | `MatterSim-v1.0.0-1M.pth` | 双方共用的 MatterSim 权重；自备文件请使用绝对路径 |
 | `RELAX_FMAX` / `RELAX_STEPS` | `0.05` / `500` | 优化收敛阈值，eV/Å / 最大优化步数 |
 | `GPU_WORKERS` | `1` | MatterSim 优化与 CHGNet 能量预测进程数；每个进程使用一个可见 GPU，电压扫描使用相同数量的 CPU 进程 |
+| `NOVELTY_TRAINING_DATA` / `NOVELTY_REFERENCE_DATA` | MatterGen `data-release/alex-mp/` 中的官方训练 ZIP / MP2020 参考 LMDB.gz | 本地结构数据路径；数据须实际下载，Git LFS 指针不算有效数据 |
+| `NOVELTY_TRAINING_SPLITS` | `train` | 默认只检查训练划分；显式设置 `train,val` 可同时检查验证划分 |
+| `SKIP_NOVELTY` | `0` | 默认执行新颖性筛选；设为 `1` 显式跳过时，输出标记为 `not_checked` |
 | `VOLTAGE_THRESHOLD` | `0.001` | 电压数值容差，eV/non-Li atom |
 | `TARGET_VOLTAGE` | 空 | 可选精确工作电压，相对 Li/Li⁺ |
 | `MIN_VOLTAGE_WINDOW` | `0` | 最小已采样稳定区间宽度，V；仍要求非零宽度 |
@@ -100,7 +103,10 @@ WORKDIR="$MATTERGEN_ROOT" ROOT="$RESULTS_ROOT/generated" \
 | `top300_run/chgnet_hull_top300.csv` | 体相凸包结果，筛后结果另存 `_filtered.csv` |
 | `top300_run/chgnet_voltage_window_top300.csv` | 电压结果、全部稳定区间、失败状态 |
 | `top300_run/voltage_filter_audit.csv` | 体相通过候选的电压接受/拒绝理由 |
-| `top300_run/final_candidates.csv` | 同时通过体相与电压筛选的候选 |
+| `top300_run/pre_novelty_candidates.csv` | 通过体相与电压筛选的新颖性比对输入 |
+| `top300_run/novelty_filter_audit.csv` | 每个候选的训练/参考集匹配编号、数据划分、状态与错误 |
+| `top300_run/novelty_summary.json` | 数据文件 SHA256、划分覆盖、比对参数及通过/拒绝数量 |
+| `top300_run/final_candidates.csv` | 同时通过体相、电压和训练/参考集新颖性筛选的候选；显式跳过新颖性时标记 `not_checked` |
 
 化学检查默认开启，异常或未知状态不会通过。`f_o=O/(O+F+Cl+Br+I)` 必须在设置区间内。默认 Li 为 +1、Nb 可取 +3/+4/+5、O 为 −2、卤素为 −1；支持固定计量下的混合价，CLI 可用 `--oxidation-states` 覆盖。切换体系时同步修改生成与 required/allowed 元素；用 `--no-light-oxy`、`--no-charge-balance`、`--no-smact` 显式关闭对应规则。关闭独立电中性检查时，启用的 SMACT 仍检查电中性。
 
@@ -108,7 +114,13 @@ WORKDIR="$MATTERGEN_ROOT" ROOT="$RESULTS_ROOT/generated" \
 
 体相筛选默认为 0.05 eV/atom。电压扫描默认为 0–6 V、步长 0.05 V，容差为 0.001 eV/non-Li atom。`stable_intervals_json` 保留分离区间；主结果取最宽区间，同宽取低电压区间。`*_boundary_bracket` 给出采样边界夹区，`*_bound_censored` 表示扫描端点截尾，真实边界尚未确定。
 
-`window_status` 区分 `stable_window`、`scan_censored`、`no_stable_window`、`calculation_failed`。最终筛选要求成功、有限且非零的稳定区间、满足最小宽度；截尾区间可通过并保留标记。指定 target 时额外在精确电压计算并要求稳定。失败结果保留错误，不充当分解边界。没有候选通过时写出空的本次结果。
+`window_status` 区分 `stable_window`、`scan_censored`、`no_stable_window`、`calculation_failed`。电压筛选要求成功、有限且非零的稳定区间、满足最小宽度；截尾区间可通过并保留标记。指定 target 时额外在精确电压计算并要求稳定。失败结果保留错误，不充当分解边界。没有候选通过时写出空的本次结果。
+
+新颖性筛选在电压筛选之后执行，复用 MatterGen 的 `DisorderedStructureMatcher` 和 `get_matches`，遵循其有序/无序结构、原胞和超胞匹配判定。默认容差为 `ltol=0.2`、`stol=0.3`（归一化位移容差）、`angle_tol=5°`。数据读取按候选的真实元素体系筛选，结构是否等价由 MatterGen 判断；摘要记录实际匹配器模块、版本、代码路径及参数。匹配到任一数据源的结构被淘汰；只有全部所需数据源覆盖完整且未找到匹配的候选进入最终表。数据缺失、仅有组成而没有结构、损坏结构或比较失败均不能通过，流程保留审计并报错。ZIP 中的 `ref.csv` 若只有元数据，不会充当结构参考集。
+
+`run_top300_pipeline.py` 可重复传入 `--novelty-training-data` 和 `--novelty-reference-data` 以检查多个数据源。默认路径为 `--workdir` 下的 `data-release/alex-mp/alex_mp_20.zip` 和 `reference_MP2020correction.gz`，也可传其他本地训练 ZIP/CSV、参考 CSV 或 LMDB/.gz。参考 LMDB 解压采用流式临时文件，需预留解压磁盘空间；不会安装 MatterGen、调用 GPU 或重新松弛候选。`--skip-novelty` 只用于显式跳过，跳过输出的 `passes_novelty_filter=False`。
+
+此步骤验证的是“相对于指定数据文件及匹配参数未找到已有结构”，不等同于完成最新数据库或文献检索。训练覆盖是指定公开数据划分，未证明某个检查点训练时每条记录的实际使用情况。
 
 表中的 `path` 指向实际计算能量的优化后 CIF，`source_path` 保留输入来源；`relaxation_settings_json` 和 `relaxation_status` 记录优化设置与状态。电压直接复用上述快照，不能把旧凸包 CSV 和新流程混用；旧结果需从 Top-K 重新计算。正式重跑会先清除原最终通过表，避免失败后误读上一次结果。
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Deduplicate, select diverse candidates, and apply hull/voltage gates."""
+"""Deduplicate candidates and apply hull, voltage and dataset novelty gates."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import copy
 import json
 import math
 import os
@@ -42,8 +43,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--voltage-threshold", type=float, default=1e-3, help="Grand-hull tolerance in eV/non-Li atom; a numerical tolerance, distinct from the bulk hull cutoff.")
     parser.add_argument("--target-voltage", type=float, default=None, help="Optional working voltage vs Li/Li+; candidates must be stable at this exact voltage.")
     parser.add_argument("--min-voltage-window", type=float, default=0.0, help="Minimum verified width in V; zero still requires a nonzero stable interval.")
-    parser.add_argument("--final-out", type=Path, default=None, help="CSV of candidates passing both hull and voltage gates.")
+    parser.add_argument("--final-out", type=Path, default=None, help="CSV of candidates passing hull, voltage and dataset novelty gates.")
     parser.add_argument("--voltage-filter-audit", type=Path, default=None, help="CSV recording every voltage acceptance/rejection.")
+    parser.add_argument("--pre-novelty-out", type=Path, default=None, help="Candidates passing hull/voltage, before the novelty gate.")
+    parser.add_argument("--novelty-training-data", type=Path, action="append", default=None, help="Training CSV/ZIP; repeat for multiple datasets. Default: workdir/data-release/alex-mp/alex_mp_20.zip.")
+    parser.add_argument("--novelty-reference-data", type=Path, action="append", default=None, help="Reference LMDB/.gz; repeat for multiple datasets. Default: workdir/data-release/alex-mp/reference_MP2020correction.gz.")
+    parser.add_argument("--novelty-training-splits", default="train", help="Comma-separated training splits to check; validation is not training unless explicitly included.")
+    parser.add_argument("--novelty-audit", type=Path, default=None, help="Per-candidate training/reference matches and failures.")
+    parser.add_argument("--novelty-summary", type=Path, default=None, help="Dataset coverage, SHA256 hashes, matcher settings and counts.")
+    parser.add_argument("--novelty-scratch-dir", type=Path, default=None, help="Temporary storage for streaming reference decompression.")
+    parser.add_argument("--skip-novelty", action="store_true", help="Explicitly skip dataset novelty; outputs are marked not_checked, never novel.")
     parser.add_argument("--dry-run", action="store_true", help="Prepare inputs but skip CHGNet / MP computations.")
     parser.add_argument("--gpu-workers", type=int, default=1, help="GPU processes for energy predictions; voltage scans use the same number of CPU processes. Each process preserves the full competing-phase set.")
     from mattersim_relaxation import add_relaxation_arguments, settings_from_args
@@ -68,6 +77,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--voltage-step must be finite and positive")
     if args.target_voltage is not None and not math.isfinite(args.target_voltage):
         parser.error("--target-voltage must be finite")
+    args.novelty_training_splits = tuple(s.strip() for s in args.novelty_training_splits.split(",") if s.strip())
+    if not args.novelty_training_splits or len(set(args.novelty_training_splits)) != len(args.novelty_training_splits):
+        parser.error("--novelty-training-splits must contain distinct, nonempty split names")
+    if args.skip_novelty and (args.novelty_training_data or args.novelty_reference_data):
+        parser.error("--skip-novelty cannot be combined with novelty datasets")
     return args
 
 
@@ -270,6 +284,42 @@ def filter_voltage(stable_csv: Path, voltage_csv: Path, final_csv: Path,
     return len(kept)
 
 
+def finalize_novelty(args, workdir: Path) -> dict:
+    """Only publish final candidates after the last, CPU-only novelty gate."""
+    if args.skip_novelty:
+        with args.pre_novelty_out.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            rows, fields = list(reader), reader.fieldnames or []
+        fields = list(dict.fromkeys(fields + ["novelty_status", "passes_novelty_filter"]))
+        for row in rows:
+            row.update(novelty_status="not_checked", passes_novelty_filter=False)
+        temporary = args.final_out.with_suffix(args.final_out.suffix + ".tmp")
+        args.final_out.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        temporary.replace(args.final_out)
+        args.novelty_summary.parent.mkdir(parents=True, exist_ok=True)
+        summary = {"status": "skipped", "coverage_complete": False, "input_candidates": len(rows),
+                   "reason": "explicit_skip_novelty", "scope": "training_and_reference_datasets_only"}
+        args.novelty_summary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print("[WARN] Dataset novelty explicitly skipped; final candidates are marked not_checked.")
+        return summary
+    from novelty_screening import run_novelty_gate
+    training = args.novelty_training_data or [workdir / "data-release/alex-mp/alex_mp_20.zip"]
+    reference = args.novelty_reference_data or [workdir / "data-release/alex-mp/reference_MP2020correction.gz"]
+    summary = run_novelty_gate(args.pre_novelty_out, args.final_out, args.novelty_audit,
+                              args.novelty_summary, training, reference,
+                              training_splits=args.novelty_training_splits,
+                              scratch_dir=args.novelty_scratch_dir, base_dir=workdir)
+    if summary["status"] != "completed":
+        detail = "; ".join(summary.get("errors", [])[:3])
+        raise RuntimeError(f"Novelty screening incomplete: {detail}; see {args.novelty_audit} and {args.novelty_summary}")
+    print(f"[INFO] Dataset novelty gate: {summary['counts']['passed']}/{summary['counts']['input_candidates']} candidates retained -> {args.final_out}")
+    return summary
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
     workdir = args.workdir.resolve()
@@ -296,10 +346,36 @@ def main(argv=None) -> None:
         args.final_out = output_dir / "final_candidates.csv"
     if args.voltage_filter_audit is None:
         args.voltage_filter_audit = output_dir / "voltage_filter_audit.csv"
-
+    if args.pre_novelty_out is None:
+        args.pre_novelty_out = output_dir / "pre_novelty_candidates.csv"
+    if args.novelty_audit is None:
+        args.novelty_audit = output_dir / "novelty_filter_audit.csv"
+    if args.novelty_summary is None:
+        args.novelty_summary = output_dir / "novelty_summary.json"
+    novelty_outputs = (args.final_out, args.pre_novelty_out, args.novelty_audit, args.novelty_summary)
+    resolved_outputs = [path.resolve() for path in novelty_outputs]
+    protected_inputs = {args.stage2_csv.resolve(),
+                        (workdir / "data-release/alex-mp/alex_mp_20.zip").resolve(),
+                        (workdir / "data-release/alex-mp/reference_MP2020correction.gz").resolve()}
+    protected_inputs.update(path.resolve() for path in (args.novelty_training_data or []) + (args.novelty_reference_data or []))
+    if len(set(resolved_outputs)) != len(resolved_outputs) or set(resolved_outputs) & protected_inputs:
+        raise ValueError("Novelty output paths must be distinct and must not overwrite inputs or datasets")
+    # Inspect source aliases before cleanup, but validate the input afterwards
+    # so a failed rerun still removes an earlier successful final list.
+    source_structures = set()
+    try:
+        with args.stage2_csv.open(newline="") as fh:
+            for row in csv.DictReader(fh):
+                source = row.get("path")
+                if isinstance(source, str) and source.strip():
+                    source_structures.add(Path(source).expanduser().resolve())
+    except (OSError, UnicodeError, csv.Error):
+        pass  # read_stage2_rows reports unreadable/invalid input below.
+    if set(resolved_outputs) & source_structures:
+        raise ValueError("Novelty output paths must not overwrite source structures")
     if not args.dry_run:
         # A failed rerun must not leave a previous run's accepted candidates.
-        for path in (args.final_out, args.voltage_filter_audit):
+        for path in (args.final_out, args.voltage_filter_audit, args.novelty_audit, args.novelty_summary):
             path.unlink(missing_ok=True)
 
     os.makedirs(args.export_dir, exist_ok=True)
@@ -324,8 +400,9 @@ def main(argv=None) -> None:
             write_empty_csv(args.ehull_out, ("file", "path", "energy_above_hull_eV"))
             write_empty_csv(args.filtered_out, ("file", "path", "energy_above_hull_eV"))
             write_empty_csv(args.voltage_out, ("file", "window_status", "window"))
-            for path in (args.final_out, args.voltage_filter_audit):
-                write_empty_csv(path, ("file", "window_status", "window", "passes_voltage_filter", "voltage_filter_reason"))
+            for path in (args.pre_novelty_out, args.voltage_filter_audit):
+                write_empty_csv(path, ("file", "path", "window_status", "window", "passes_voltage_filter", "voltage_filter_reason"))
+            finalize_novelty(args, workdir)
         print("[INFO] Chemical screening retained no candidates; subsequent stages skipped.")
         return
 
@@ -338,7 +415,10 @@ def main(argv=None) -> None:
 
     if args.gpu_workers > 1:
         from parallel_screening import run_parallel_screening
-        run_parallel_screening(args, renamed_index, workdir)
+        thermal_args = copy.copy(args)
+        thermal_args.final_out = args.pre_novelty_out
+        run_parallel_screening(thermal_args, renamed_index, workdir)
+        finalize_novelty(args, workdir)
         return
 
     from mattersim_relaxation import settings_from_args
@@ -353,16 +433,18 @@ def main(argv=None) -> None:
         with args.filtered_out.open(newline="") as fh:
             fieldnames = csv.DictReader(fh).fieldnames or []
         write_empty_csv(args.voltage_out, ("file", "window_status", "window"))
-        for path in (args.final_out, args.voltage_filter_audit):
+        for path in (args.pre_novelty_out, args.voltage_filter_audit):
             write_empty_csv(path, list(dict.fromkeys(fieldnames + ["window_status", "window", "passes_voltage_filter", "voltage_filter_reason"])))
+        finalize_novelty(args, workdir)
         return
 
     run_voltage(args.voltage_script, args.filtered_out, args.voltage_out, args.voltage_step, args.voltage_threshold,
                 cwd=workdir, target_voltage=args.target_voltage,
                 relaxation_settings=relaxation_settings if builtin_voltage else None,
                 reference_snapshot=args.ehull_out.parent / "relaxation" / "reference_entries.json" if builtin_hull and builtin_voltage else None)
-    filter_voltage(args.filtered_out, args.voltage_out, args.final_out, args.voltage_filter_audit,
+    filter_voltage(args.filtered_out, args.voltage_out, args.pre_novelty_out, args.voltage_filter_audit,
                    target_voltage=args.target_voltage, min_window=args.min_voltage_window)
+    finalize_novelty(args, workdir)
     print(f"[INFO] Voltage window results saved to {args.voltage_out}")
     print(f"[INFO] Export index located at {renamed_index}")
 
