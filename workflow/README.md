@@ -13,7 +13,7 @@ export RUNTIME_ROOT="$PWD/_runtime"
 # 完整体相/电压计算需要先设置自己的 MP_API_KEY。
 ```
 
-`RESULTS_ROOT` 可以指向其他绝对路径，历史结果无需移动。生成模型权重、CHGNet 和 Materials Project 查询依赖需已准备好。
+`RESULTS_ROOT` 可以指向其他绝对路径，历史结果无需移动。生成模型权重、MatterSim、CHGNet 和 Materials Project 查询依赖需已准备好。
 
 ## 2. 生成并运行全流程
 
@@ -25,7 +25,7 @@ CHEMICAL_SYSTEMS='Li-Nb-O-Cl' \
   bash workflow/pipeline/run_full_pipeline.sh
 ```
 
-顺序为分段生成、统一评估、化学筛选、结构去重与多样性选择、CIF 导出、体相凸包筛选、电压筛选。生成数量约为 `BATCH_SIZE × NUM_BATCHES_PER_SEGMENT × SEGMENTS`。`DRY_RUN=1` 仍会生成和评估，随后止于去重与 CIF 导出；仅检查已有结构时使用下一节。
+顺序为分段生成、统一评估、化学筛选、结构去重与多样性选择、CIF 导出、候选与 MP 竞争结构统一 MatterSim 优化、CHGNet 能量及体相凸包筛选、电压筛选。生成数量约为 `BATCH_SIZE × NUM_BATCHES_PER_SEGMENT × SEGMENTS`。`DRY_RUN=1` 仍会生成和评估，随后止于去重与 CIF 导出；仅检查已有结构时使用下一节。
 
 常用环境参数如下：
 
@@ -37,18 +37,24 @@ CHEMICAL_SYSTEMS='Li-Nb-O-Cl' \
 | `FILTER_LIGHT_OXY` / `LIGHT_OXY` | `1` / `0.05 0.35` | 氧/卤素比例实际过滤及闭区间 |
 | `R_CUT` | `3.0` | 周期 Li 图近邻距离，Å |
 | `TOPK` / `SELECTION_MODE` | `300` / `diverse` | 最多导出数量 / 组成轮流选择；`score` 也先去重 |
-| `GPU_WORKERS` | `1` | 凸包/电压阶段的 CHGNet 能量预测进程数；每个进程使用一个可见 GPU，电压扫描使用相同数量的 CPU 进程 |
+| `MATTERSIM_CHECKPOINT` | `MatterSim-v1.0.0-1M.pth` | 双方共用的 MatterSim 权重；自备文件请使用绝对路径 |
+| `RELAX_FMAX` / `RELAX_STEPS` | `0.05` / `500` | 优化收敛阈值，eV/Å / 最大优化步数 |
+| `GPU_WORKERS` | `1` | MatterSim 优化与 CHGNet 能量预测进程数；每个进程使用一个可见 GPU，电压扫描使用相同数量的 CPU 进程 |
 | `VOLTAGE_THRESHOLD` | `0.001` | 电压数值容差，eV/non-Li atom |
 | `TARGET_VOLTAGE` | 空 | 可选精确工作电压，相对 Li/Li⁺ |
 | `MIN_VOLTAGE_WINDOW` | `0` | 最小已采样稳定区间宽度，V；仍要求非零宽度 |
 
 需要在 4.5 V 稳定且已采样区间至少 1 V 时，可在全流程前执行 `export TARGET_VOLTAGE=4.5 MIN_VOLTAGE_WINDOW=1.0`。未指定工作电压时保持为空。
 
-有 4 个可用 GPU 时，设置 `GPU_WORKERS=4`，或给 `run_top300_pipeline.py` 传入 `--gpu-workers 4`。Slurm 作业须同时申请 `--gres=gpu:4`。程序遵守 `CUDA_VISIBLE_DEVICES`；可见 GPU 少于请求数时会报错。化学筛选、去重与导出统一执行，候选和 MP 参考结构的能量并行计算，然后用完整候选集合建立共同凸包。电压扫描的每个进程也使用完整竞争相集合，避免分片改变筛选结果。MP 数据每次运行统一获取，竞争相能量只计算一次并复用；候选预测失败会保留在凸包表中，任一竞争相预测失败则中止本次筛选。分片输入、输出、日志及状态保存在输出目录的 `parallel_screening/`。
+有 4 个可用 GPU 时，设置 `GPU_WORKERS=4`，或给 `run_top300_pipeline.py` 传入 `--gpu-workers 4`。Slurm 作业须同时申请 `--gres=gpu:4`。程序遵守 `CUDA_VISIBLE_DEVICES`；可见 GPU 少于请求数时会报错。化学筛选、去重与导出统一执行，候选和 MP 参考结构的优化及能量计算并行执行，然后用完整候选集合建立共同凸包。电压扫描的每个进程也使用完整竞争相集合，避免分片改变筛选结果。MP 数据每次运行统一获取，竞争相只优化和计算一次并复用；候选计算失败会保留失败记录，任一竞争相失败则阻止使用不完整的参考集筛选。分片输入、输出、日志及状态保存在输出目录的 `parallel_screening/`。
+
+双方从各自输入结构开始，使用相同权重、FIRE 优化器及 ExpCellFilter，同时优化原子位置和晶胞，外压为零；达到力阈值后才使用固定的 CHGNet 0.3.0 计算单点能量。MatterSim 的能量不进入凸包或电压相图。候选即使已经经过生成阶段的优化，也会在这里按本次设置重新优化。未收敛、非有限能量或参考集缺失不能通过筛选。
+
+Top-K、独立凸包脚本及可选全量 CHGNet 工具都支持 `--mattersim-checkpoint`、`--relax-fmax`、`--relax-steps`。电压脚本复用凸包阶段保存的结构与能量快照，并核对优化设置和 CIF 文件；修改优化设置后需重跑凸包。Web 的单独 Top-K 和全流程使用相同默认值，API 的 `Top300Request` 可设置 `mattersim_checkpoint`、`relax_fmax`、`relax_steps`。
 
 ## 3. 从已有 relaxed.extxyz 重跑
 
-不会重新生成或松弛结构。将 `--base` 指向包含历史 `relaxed.extxyz` 的目录；输出写入本次 `RESULTS_ROOT`：
+不会重新生成结构。screen 与 Top-K dry-run 读取历史 `relaxed.extxyz`；实际体相筛选时会对候选和 MP 竞争结构统一重新优化。将 `--base` 指向包含历史 `relaxed.extxyz` 的目录；输出写入本次 `RESULTS_ROOT`：
 
 ```bash
 python workflow/pipeline/screen_all_extxyz.py \
@@ -90,6 +96,7 @@ WORKDIR="$MATTERGEN_ROOT" ROOT="$RESULTS_ROOT/generated" \
 | `stage2_candidates.csv`、`screened_out.csv` | 化学通过候选、拒绝及错误理由 |
 | `top300_run/selection_audit.csv`、`top300_run/selection_summary.json` | 去重/选择逐条审计、计数与匹配参数 |
 | `top300_run/exported_300cifs/` | 本次入选 CIF 与 `export_300index.csv` |
+| `top300_run/relaxation/` | 双方优化后的 CIF、优化审计及共用的 `reference_entries.json` 相图快照 |
 | `top300_run/chgnet_hull_top300.csv` | 体相凸包结果，筛后结果另存 `_filtered.csv` |
 | `top300_run/chgnet_voltage_window_top300.csv` | 电压结果、全部稳定区间、失败状态 |
 | `top300_run/voltage_filter_audit.csv` | 体相通过候选的电压接受/拒绝理由 |
@@ -103,7 +110,9 @@ WORKDIR="$MATTERGEN_ROOT" ROOT="$RESULTS_ROOT/generated" \
 
 `window_status` 区分 `stable_window`、`scan_censored`、`no_stable_window`、`calculation_failed`。最终筛选要求成功、有限且非零的稳定区间、满足最小宽度；截尾区间可通过并保留标记。指定 target 时额外在精确电压计算并要求稳定。失败结果保留错误，不充当分解边界。没有候选通过时写出空的本次结果。
 
-统一 DFT 校准与充分的输运验证尚未接入；最终候选用于下一步计算验证。
+表中的 `path` 指向实际计算能量的优化后 CIF，`source_path` 保留输入来源；`relaxation_settings_json` 和 `relaxation_status` 记录优化设置与状态。电压直接复用上述快照，不能把旧凸包 CSV 和新流程混用；旧结果需从 Top-K 重新计算。正式重跑会先清除原最终通过表，避免失败后误读上一次结果。
+
+统一 MatterSim 优化解决候选与竞争结构处理不一致的问题。统一 DFT 校准与充分的输运验证尚未接入；最终候选用于下一步计算验证。
 
 ## 5. 绘图与指标汇总
 
@@ -121,7 +130,7 @@ python workflow/analysis/merge_metrics_to_single_json.py \
 
 ## 6. 可选 MD 与轨迹后处理
 
-这些工具需单独运行，不属于默认筛选 gate。MD 只接受带通过审计的最终候选，默认读取本仓库 `results/top300_run/final_candidates.csv`，输出到 `results/transport/`。默认 700 K、10 ps 仅用于探索；自定义结果目录时显式传输入和输出。下面只是参数用法示例，采样长度与重复数需按材料的扩散行为制定。
+这些工具需单独运行，不属于默认筛选 gate。MD 只接受带通过审计的最终候选，默认读取本仓库 `results/top300_run/final_candidates.csv`，输出到 `results/transport/`。优先使用表中 `path` 指向的优化后 CIF；`--cif-dir` 只用于没有 `path` 的旧表，已记录的优化文件丢失时会跳过并报原因。默认 700 K、10 ps 仅用于探索；自定义结果目录时显式传输入和输出。下面只是参数用法示例，采样长度与重复数需按材料的扩散行为制定。
 
 ```bash
 mkdir -p "$RESULTS_ROOT/transport"
@@ -150,7 +159,7 @@ MSD 中的帧间隔必须与实际 MD 输出一致；多轨迹输入会按物种
 
 ## 7. 可选工具
 
-- `tools/compute_hull_from_relaxed.py`：直接对全部 relaxed 帧算凸包。CHGNet 模式用 `--root "$RESULTS_ROOT" --mode chgnet --out "$RESULTS_ROOT/all_hull.csv"`。MP 模式用 `--mode mp --energies-csv dft_energies.csv`，CSV 只读取 `id` 和 `energy_eV`；使用前需确认 DFT 能量及兼容性元数据是否可比，该入口不接收完整校正元数据。
+- `tools/compute_hull_from_relaxed.py`：直接对全部 relaxed 帧算凸包。CHGNet 模式用 `--root "$RESULTS_ROOT" --mode chgnet --out "$RESULTS_ROOT/all_hull.csv"`，同样统一优化双方，优化结果保存到输出旁的 `relaxation/all_frames/`。MP 模式用 `--mode mp --energies-csv dft_energies.csv`，CSV 只读取 `id` 和 `energy_eV`；使用前需确认 DFT 能量及兼容性元数据是否可比，该入口不接收完整校正元数据。
 - `tools/eval_filtered_structs.py`：对指定 CSV 的 CIF 再评估并汇总指标，例如 `--csv "$RESULTS_ROOT/top300_run/final_candidates.csv" --out-dir "$RESULTS_ROOT/re_evaluated" --summary-csv "$RESULTS_ROOT/re_evaluated/metrics_summary.csv"`。
 - `tools/extxyz_to_cif.py`：任意 extxyz 帧转 CIF，例如 `--input /absolute/path/relaxed.extxyz --frames 0 2 --outdir "$RESULTS_ROOT/manual_cifs"`。
 

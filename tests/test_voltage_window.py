@@ -4,12 +4,11 @@ import importlib.util
 import csv
 import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
 from pymatgen.analysis.phase_diagram import PDEntry
-from pymatgen.core import Composition, Element
+from pymatgen.core import Element
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def voltage_module(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "workflow" / "pipeline"))
     # Any eager model or API dependency now fails the import, ensuring these
     # regressions remain usable in the small, pure-pymatgen environment.
     for name in ("chgnet", "mp_api", "compute_ehull_chgnet"):
@@ -231,91 +231,20 @@ def test_negative_finite_target_voltage_is_allowed(voltage_module):
     assert result.target_e_above_hull_eV == 0
 
 
-@pytest.mark.parametrize("competitor_failure", [None, "empty", "no_reference", "partial"])
-def test_cli_csv_preserves_success_and_failure_rows(
-    voltage_module, monkeypatch, tmp_path, competitor_failure
-):
-    model_module = types.ModuleType("chgnet.model")
-    model_module.CHGNet = type("FakeCHGNet", (), {"load": staticmethod(lambda: object())})
-    client_module = types.ModuleType("mp_api.client")
-
-    class FakeMPRester:
-        def __init__(self, key, use_document_model):
-            assert key == "offline-test-key"
-            assert use_document_model is False
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-    client_module.MPRester = FakeMPRester
-    for package in ("chgnet", "mp_api"):
-        monkeypatch.setitem(sys.modules, package, types.ModuleType(package))
-    monkeypatch.setitem(sys.modules, "chgnet.model", model_module)
-    monkeypatch.setitem(sys.modules, "mp_api.client", client_module)
-    helper = types.ModuleType("compute_ehull_chgnet")
-    helper.fetch_mp_competitor_structures = (
-        lambda *args: [] if competitor_failure == "empty" else [object(), object()]
-    )
-    helper.structures_to_entries = lambda *args: (
-        [PDEntry("Li", -1)] if competitor_failure == "partial" else (
-            [PDEntry("Cl", 0), PDEntry("Cl", 1)]
-            if competitor_failure == "no_reference"
-            else [PDEntry("Li", -1), PDEntry("Cl", 0)]
-        )
-    )
-    monkeypatch.setitem(sys.modules, "compute_ehull_chgnet", helper)
-    monkeypatch.setattr(
-        voltage_module.Structure,
-        "from_file",
-        lambda path: types.SimpleNamespace(composition=Composition("LiCl")),
-    )
-
-    input_csv = tmp_path / "candidates.csv"
+def test_cli_rejects_legacy_energies_without_uniform_snapshot(voltage_module, tmp_path):
+    input_csv = tmp_path / "legacy.csv"
     output_csv = tmp_path / "voltage.csv"
-    valid_cif = tmp_path / "valid.cif"
-    invalid_cif = tmp_path / "invalid.cif"
-    valid_cif.write_text("offline structure fixture")
-    invalid_cif.write_text("offline structure fixture")
-    rows = [
-        {"file": "valid.cif", "path": str(valid_cif), "formula": "LiCl", "chemsys": "Cl-Li", "energy_total_eV": -2},
-        {"file": "invalid.cif", "path": str(invalid_cif), "formula": "LiCl", "chemsys": "Cl-Li", "energy_total_eV": "nan"},
-    ]
-    with input_csv.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+    rows = [{"file": "legacy.cif", "path": str(tmp_path / "legacy.cif"),
+             "formula": "LiCl", "chemsys": "Cl-Li", "energy_total_eV": -2}]
+    with input_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compute_voltage_window.py", "--mp-api-key", "offline-test-key",
-            "--stable-csv", str(input_csv), "--out", str(output_csv),
-            "--voltage-max", "1.5", "--voltage-step", "0.5", "--target-voltage", "1.25",
-        ],
-    )
-    voltage_module.main()
-    with output_csv.open(newline="") as fh:
-        actual = {row["file"]: row for row in csv.DictReader(fh)}
-    assert len(actual) == 2
-    failed = actual["invalid.cif"]
-    assert failed["window_status"] == "calculation_failed"
-    assert failed["V_red"] == failed["V_ox"] == failed["window"] == ""
-    assert failed["stable_at_target"] == ""
-    assert "energy_total_eV" in failed["error"]
-    valid = actual["valid.cif"]
-    if competitor_failure:
-        assert valid["window_status"] == "calculation_failed"
-        assert valid["window"] == ""
-        assert valid["stable_intervals_json"] == "[]"
-        assert "Competing-phase preparation failed" in valid["error"]
-    else:
-        assert valid["window_status"] == "scan_censored"
-        assert valid["V_red"] == "0.0"
-        assert valid["V_ox"] == "1.0"
-        assert valid["window"] == "1.0"
-        assert valid["stable_at_target"] == "False"
-        assert float(valid["target_e_above_hull_eV"]) == pytest.approx(0.25)
-        assert json.loads(valid["upper_boundary_bracket"]) == [1, 1.5]
+    # The fixture blocks both model and API packages. A stale table produces a
+    # failed output row instead of refetching competitors or mixing baselines.
+    voltage_module.main(["--stable-csv", str(input_csv), "--out", str(output_csv)])
+    with output_csv.open(newline="") as handle:
+        actual = list(csv.DictReader(handle))
+    assert actual[0]["window_status"] == "calculation_failed"
+    assert actual[0]["window"] == actual[0]["stable_at_target"] == ""
+    assert actual[0]["error"]

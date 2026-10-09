@@ -36,6 +36,8 @@ export RUNTIME_ROOT="$SCRATCH/LiNbOCl/_runtime"
 
 `PROJECT_ROOT` 指向整个仓库，`WORKFLOW_ROOT` 指向其中的 `workflow/`。不会分别上传或安装两套项目脚本。
 
+候选和 MP 竞争结构都在筛选阶段使用相同 MatterSim 设置优化，再计算 CHGNet 0.3.0 能量；电压复用同一优化快照。计算节点无网络时提前准备 MatterSim 权重，设置 `MATTERSIM_CHECKPOINT` 为其绝对路径；可用 `RELAX_FMAX`、`RELAX_STEPS` 调整双方共同的收敛设置，默认 0.05 eV/Å、500 步。
+
 ## 3. 提交任务
 
 从仓库根目录提交：

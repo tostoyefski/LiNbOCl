@@ -4,9 +4,11 @@
 
 - `in_container.sh`：通过现有 proot 容器执行命令，复用服务器已有的 MatterGen 安装。
 - `run_shard.py` / `shard.sbatch`：30 组，每组生成 200 个候选并松弛；生成条件为 `chemical_system=Li-Nb-O-Cl`、`energy_above_hull=0.05`，使用已有 `chemical_system_energy_above_hull` 权重。
-- `screen_inside.sh` / `screen.sbatch`：校验 6000 个松弛结构，统一化学筛选及去重，再使用 2 个 GPU 预测能量、2 个 CPU 进程扫描电压窗口；凸包筛选阈值为 0.05 eV/atom。
+- `screen_inside.sh` / `screen.sbatch`：校验 6000 个松弛结构，统一化学筛选及去重，再使用 2 个 GPU 对候选和 MP 竞争结构统一 MatterSim 优化、计算 CHGNet 能量，2 个 CPU 进程扫描电压窗口；凸包筛选阈值为 0.05 eV/atom。
 
 运行前需要存在 `_runtime/venv/bin/python`（复用已有 MatterGen 依赖的独立环境）、MatterSim 权重 `_runtime/MatterSim-v1.0.0-1M.pth`、CHGNet 0.3.0 模型及 `_runtime/mp.env`。密钥文件权限应设为 `600`；环境、权重、密钥和结果目录均不纳入 Git。
+
+筛选默认共用上述 MatterSim 权重，`RELAX_FMAX=0.05`、`RELAX_STEPS=500`；可用 `MATTERSIM_CHECKPOINT` 指定其他权重的绝对路径。优化后结构及审计保存到本次 Top-K 输出的 `relaxation/`，电压复用同一快照。旧筛选结果需重新运行筛选阶段才能获得统一基线；重新生成候选并非必要。
 
 从仓库根目录提交，先验证首组，再运行剩余组和筛选：
 

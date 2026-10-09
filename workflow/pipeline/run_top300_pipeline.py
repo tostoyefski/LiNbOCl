@@ -46,7 +46,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--voltage-filter-audit", type=Path, default=None, help="CSV recording every voltage acceptance/rejection.")
     parser.add_argument("--dry-run", action="store_true", help="Prepare inputs but skip CHGNet / MP computations.")
     parser.add_argument("--gpu-workers", type=int, default=1, help="GPU processes for energy predictions; voltage scans use the same number of CPU processes. Each process preserves the full competing-phase set.")
+    from mattersim_relaxation import add_relaxation_arguments, settings_from_args
+    add_relaxation_arguments(parser)
     args = parser.parse_args(argv)
+    try:
+        settings_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.topk < 1:
         parser.error("--topk must be positive")
     if args.gpu_workers < 1:
@@ -126,10 +132,18 @@ def rename_index(index_path: Path, target_name: str) -> Path:
     return target_path
 
 
-def run_ehull(ehull_script: Path, cif_dir: Path, out_csv: Path, cwd: Path, index_csv: Path | None = None) -> None:
+def relaxation_flags(settings) -> List[str]:
+    return ["--mattersim-checkpoint", settings.checkpoint,
+            "--relax-fmax", str(settings.fmax), "--relax-steps", str(settings.max_steps)]
+
+
+def run_ehull(ehull_script: Path, cif_dir: Path, out_csv: Path, cwd: Path,
+              index_csv: Path | None = None, relaxation_settings=None) -> None:
     cmd = [sys.executable, str(ehull_script), "--cif-dir", str(cif_dir), "--out", str(out_csv)]
     if index_csv is not None:
         cmd.extend(["--cif-index", str(index_csv)])
+    if relaxation_settings is not None:
+        cmd.extend(relaxation_flags(relaxation_settings))
     run_command(cmd, cwd=cwd)
     if not out_csv.exists():
         raise FileNotFoundError(f"Hull results missing: {out_csv}")
@@ -143,6 +157,12 @@ def filter_hull(in_csv: Path, out_csv: Path, threshold: float) -> int:
         raise RuntimeError(f"No rows in hull output: {in_csv}")
     kept: List[dict] = []
     for row in rows:
+        if row.get("calculation_status", "success") != "success":
+            continue
+        if row.get("hull_status", "complete") not in {"complete", "success"}:
+            continue
+        if row.get("relaxation_status", "converged") != "converged":
+            continue
         try:
             val = float(row.get("energy_above_hull_eV", "nan"))
         except (TypeError, ValueError):
@@ -168,6 +188,8 @@ def run_voltage(
     threshold: float | None,
     cwd: Path,
     target_voltage: float | None = None,
+    relaxation_settings=None,
+    reference_snapshot: Path | None = None,
 ) -> None:
     cmd = [sys.executable, str(voltage_script), "--stable-csv", str(stable_csv), "--out", str(out_csv)]
     if voltage_step is not None:
@@ -176,6 +198,10 @@ def run_voltage(
         cmd.extend(["--threshold", str(threshold)])
     if target_voltage is not None:
         cmd.extend(["--target-voltage", str(target_voltage)])
+    if relaxation_settings is not None:
+        cmd.extend(relaxation_flags(relaxation_settings))
+    if reference_snapshot is not None:
+        cmd.extend(["--reference-snapshot", str(reference_snapshot)])
     run_command(cmd, cwd=cwd)
     if not out_csv.exists():
         raise FileNotFoundError(f"Voltage results missing: {out_csv}")
@@ -271,6 +297,11 @@ def main(argv=None) -> None:
     if args.voltage_filter_audit is None:
         args.voltage_filter_audit = output_dir / "voltage_filter_audit.csv"
 
+    if not args.dry_run:
+        # A failed rerun must not leave a previous run's accepted candidates.
+        for path in (args.final_out, args.voltage_filter_audit):
+            path.unlink(missing_ok=True)
+
     os.makedirs(args.export_dir, exist_ok=True)
     os.chdir(workdir)
 
@@ -310,7 +341,12 @@ def main(argv=None) -> None:
         run_parallel_screening(args, renamed_index, workdir)
         return
 
-    run_ehull(args.ehull_script, args.export_dir, args.ehull_out, cwd=workdir, index_csv=renamed_index)
+    from mattersim_relaxation import settings_from_args
+    relaxation_settings = settings_from_args(args)
+    builtin_hull = args.ehull_script == SCRIPTS_DIR / "compute_ehull_chgnet.py"
+    builtin_voltage = args.voltage_script == SCRIPTS_DIR / "compute_voltage_window.py"
+    run_ehull(args.ehull_script, args.export_dir, args.ehull_out, cwd=workdir, index_csv=renamed_index,
+              relaxation_settings=relaxation_settings if builtin_hull else None)
     kept = filter_hull(args.ehull_out, args.filtered_out, args.ehull_threshold)
     if kept == 0:
         print("[WARN] No structures met the hull criterion; voltage window step will be skipped.")
@@ -321,7 +357,10 @@ def main(argv=None) -> None:
             write_empty_csv(path, list(dict.fromkeys(fieldnames + ["window_status", "window", "passes_voltage_filter", "voltage_filter_reason"])))
         return
 
-    run_voltage(args.voltage_script, args.filtered_out, args.voltage_out, args.voltage_step, args.voltage_threshold, cwd=workdir, target_voltage=args.target_voltage)
+    run_voltage(args.voltage_script, args.filtered_out, args.voltage_out, args.voltage_step, args.voltage_threshold,
+                cwd=workdir, target_voltage=args.target_voltage,
+                relaxation_settings=relaxation_settings if builtin_voltage else None,
+                reference_snapshot=args.ehull_out.parent / "relaxation" / "reference_entries.json" if builtin_hull and builtin_voltage else None)
     filter_voltage(args.filtered_out, args.voltage_out, args.final_out, args.voltage_filter_audit,
                    target_voltage=args.target_voltage, min_window=args.min_voltage_window)
     print(f"[INFO] Voltage window results saved to {args.voltage_out}")

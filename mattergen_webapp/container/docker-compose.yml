@@ -16,6 +16,7 @@ services:
       RESULTS_ROOT: /runs/results
       RUNTIME_ROOT: /runs/_runtime
       MP_API_KEY: ${MP_API_KEY}
+      MATTERSIM_CHECKPOINT: ${MATTERSIM_CHECKPOINT:-MatterSim-v1.0.0-1M.pth}
       TMPDIR: /runs/_runtime/tmp
       TMP: /runs/_runtime/tmp
       TEMP: /runs/_runtime/tmp
@@ -48,6 +49,9 @@ services:
       RESULTS_ROOT: /runs/results
       RUNTIME_ROOT: /runs/_runtime
       MP_API_KEY: ${MP_API_KEY}
+      MATTERSIM_CHECKPOINT: ${MATTERSIM_CHECKPOINT:-MatterSim-v1.0.0-1M.pth}
+      RELAX_FMAX: ${RELAX_FMAX:-0.05}
+      RELAX_STEPS: ${RELAX_STEPS:-500}
       CHEMICAL_SYSTEMS: ${CHEMICAL_SYSTEMS:-Li-Nb-O-Cl}
       BATCH_SIZE: ${BATCH_SIZE:-16}
       NUM_BATCHES_PER_SEGMENT: ${NUM_BATCHES_PER_SEGMENT:-20}
