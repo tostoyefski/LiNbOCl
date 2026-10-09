@@ -45,9 +45,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--final-out", type=Path, default=None, help="CSV of candidates passing both hull and voltage gates.")
     parser.add_argument("--voltage-filter-audit", type=Path, default=None, help="CSV recording every voltage acceptance/rejection.")
     parser.add_argument("--dry-run", action="store_true", help="Prepare inputs but skip CHGNet / MP computations.")
+    parser.add_argument("--gpu-workers", type=int, default=1, help="GPU processes for energy predictions; voltage scans use the same number of CPU processes. Each process preserves the full competing-phase set.")
     args = parser.parse_args(argv)
     if args.topk < 1:
         parser.error("--topk must be positive")
+    if args.gpu_workers < 1:
+        parser.error("--gpu-workers must be positive")
+    if args.gpu_workers > 1 and (args.ehull_script != SCRIPTS_DIR / "compute_ehull_chgnet.py"
+                                or args.voltage_script != SCRIPTS_DIR / "compute_voltage_window.py"):
+        parser.error("--gpu-workers requires the built-in hull and voltage calculators")
     for name in ("ehull_threshold", "voltage_threshold", "min_voltage_window"):
         val = getattr(args, name)
         if not math.isfinite(val) or val < 0:
@@ -228,10 +234,12 @@ def filter_voltage(stable_csv: Path, voltage_csv: Path, final_csv: Path,
             kept.append(combined)
     for path, rows in ((final_csv, kept), (audit_csv, audit)):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)
+        temporary.replace(path)
     print(f"[INFO] Voltage gate: {len(kept)}/{len(stable_rows)} candidates retained -> {final_csv}")
     return len(kept)
 
@@ -295,6 +303,11 @@ def main(argv=None) -> None:
 
     if args.dry_run:
         print("[INFO] Dry run requested; skipping hull and voltage computations.")
+        return
+
+    if args.gpu_workers > 1:
+        from parallel_screening import run_parallel_screening
+        run_parallel_screening(args, renamed_index, workdir)
         return
 
     run_ehull(args.ehull_script, args.export_dir, args.ehull_out, cwd=workdir, index_csv=renamed_index)

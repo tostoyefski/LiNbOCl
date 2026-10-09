@@ -36,6 +36,7 @@ cd ..
 - [命令行操作指南](workflow/README.md)：全流程、从已有结果重跑、结果位置、绘图和可选 MD。
 - [Web 控制台](mattergen_webapp/README.md)：通过表单运行同一流程。
 - [HPC / Slurm](mattergen_webapp/hpc/README_HPC.md)：将整个仓库部署到集群。
+- [本次服务器部署配置](deploy/README.md)：复用现有 MatterGen，以最多 2 个 GPU 生成 6000 个候选并自动筛选。
 - [GPU 容器](mattergen_webapp/container/README_CONTAINER.md)：Docker Web 或命令行运行。
 
 已安装环境时，可从仓库根启动 Web：
