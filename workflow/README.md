@@ -37,11 +37,14 @@ CHEMICAL_SYSTEMS='Li-Nb-O-Cl' \
 | `FILTER_LIGHT_OXY` / `LIGHT_OXY` | `1` / `0.05 0.35` | 氧/卤素比例实际过滤及闭区间 |
 | `R_CUT` | `3.0` | 周期 Li 图近邻距离，Å |
 | `TOPK` / `SELECTION_MODE` | `300` / `diverse` | 最多导出数量 / 组成轮流选择；`score` 也先去重 |
+| `GPU_WORKERS` | `1` | 凸包/电压阶段的 CHGNet 能量预测进程数；每个进程使用一个可见 GPU，电压扫描使用相同数量的 CPU 进程 |
 | `VOLTAGE_THRESHOLD` | `0.001` | 电压数值容差，eV/non-Li atom |
 | `TARGET_VOLTAGE` | 空 | 可选精确工作电压，相对 Li/Li⁺ |
 | `MIN_VOLTAGE_WINDOW` | `0` | 最小已采样稳定区间宽度，V；仍要求非零宽度 |
 
 需要在 4.5 V 稳定且已采样区间至少 1 V 时，可在全流程前执行 `export TARGET_VOLTAGE=4.5 MIN_VOLTAGE_WINDOW=1.0`。未指定工作电压时保持为空。
+
+有 4 个可用 GPU 时，设置 `GPU_WORKERS=4`，或给 `run_top300_pipeline.py` 传入 `--gpu-workers 4`。Slurm 作业须同时申请 `--gres=gpu:4`。程序遵守 `CUDA_VISIBLE_DEVICES`；可见 GPU 少于请求数时会报错。化学筛选、去重与导出统一执行，候选和 MP 参考结构的能量并行计算，然后用完整候选集合建立共同凸包。电压扫描的每个进程也使用完整竞争相集合，避免分片改变筛选结果。MP 数据每次运行统一获取，竞争相能量只计算一次并复用；候选预测失败会保留在凸包表中，任一竞争相预测失败则中止本次筛选。分片输入、输出、日志及状态保存在输出目录的 `parallel_screening/`。
 
 ## 3. 从已有 relaxed.extxyz 重跑
 
