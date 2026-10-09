@@ -39,6 +39,10 @@ SELECTION_MODE="${SELECTION_MODE:-diverse}"
 VOLTAGE_THRESHOLD="${VOLTAGE_THRESHOLD:-0.001}"
 TARGET_VOLTAGE="${TARGET_VOLTAGE:-}"
 MIN_VOLTAGE_WINDOW="${MIN_VOLTAGE_WINDOW:-0}"
+NOVELTY_TRAINING_DATA="${NOVELTY_TRAINING_DATA:-}"
+NOVELTY_REFERENCE_DATA="${NOVELTY_REFERENCE_DATA:-}"
+NOVELTY_TRAINING_SPLITS="${NOVELTY_TRAINING_SPLITS:-train}"
+SKIP_NOVELTY="${SKIP_NOVELTY:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 MATTERSIM_CHECKPOINT="${MATTERSIM_CHECKPOINT:-MatterSim-v1.0.0-1M.pth}"
 RELAX_FMAX="${RELAX_FMAX:-0.05}"
@@ -156,7 +160,17 @@ top_cmd=(
   --mattersim-checkpoint "$MATTERSIM_CHECKPOINT"
   --relax-fmax "$RELAX_FMAX"
   --relax-steps "$RELAX_STEPS"
+  --novelty-training-splits "$NOVELTY_TRAINING_SPLITS"
 )
+if [[ -n "$NOVELTY_TRAINING_DATA" ]]; then
+  top_cmd+=(--novelty-training-data "$NOVELTY_TRAINING_DATA")
+fi
+if [[ -n "$NOVELTY_REFERENCE_DATA" ]]; then
+  top_cmd+=(--novelty-reference-data "$NOVELTY_REFERENCE_DATA")
+fi
+if [[ "$SKIP_NOVELTY" == "1" || "$SKIP_NOVELTY" == "true" ]]; then
+  top_cmd+=(--skip-novelty)
+fi
 if [[ -n "$TARGET_VOLTAGE" ]]; then
   top_cmd+=(--target-voltage "$TARGET_VOLTAGE")
 fi

@@ -33,6 +33,8 @@ def test_pipeline_defaults_are_diverse_and_strict(monkeypatch):
     assert args.export_script == SCRIPTS / "export_refs_to_structs.py"
     assert args.ehull_script == SCRIPTS / "compute_ehull_chgnet.py"
     assert args.voltage_script == SCRIPTS / "compute_voltage_window.py"
+    assert not args.skip_novelty
+    assert args.novelty_training_splits == ("train",)
 
 
 def test_old_score_csv_requires_rescreening(tmp_path):
@@ -108,3 +110,123 @@ def test_voltage_command_passes_optional_target(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "run_command", run)
     pipeline.run_voltage(Path("voltage.py"), Path("hull.csv"), output, 0.05, 0.001, tmp_path, target_voltage=4.25)
     assert seen[seen.index("--target-voltage") + 1] == "4.25"
+
+
+def test_parallel_pipeline_runs_novelty_after_voltage_and_preserves_intermediate(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import candidate_selection
+    import parallel_screening
+
+    stage2 = tmp_path / "stage2.csv"
+    write_csv(stage2, [{"quick_score": 1, "path": "/source.extxyz", "frame": 0,
+                       "score_kind": "li_periodic_geometry_proxy_v1"}])
+    output = tmp_path / "output"
+    events = []
+    monkeypatch.setattr(candidate_selection, "select_candidates", lambda *a, **k:
+                        SimpleNamespace(refs=["/source.extxyz::0"], counts={"selected": 1}, metadata={}))
+    monkeypatch.setattr(candidate_selection, "write_selection_audit", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "run_export", lambda *a, **k: tmp_path / "index.csv")
+    monkeypatch.setattr(pipeline, "rename_index", lambda path, name: path)
+
+    def thermal(args, index, workdir):
+        events.append("voltage")
+        assert args.final_out == output / "pre_novelty_candidates.csv"
+        write_csv(args.final_out, [{"file": "candidate.cif", "path": "/candidate.cif",
+                                   "passes_voltage_filter": True}])
+
+    def novelty(args, workdir):
+        events.append("novelty")
+        assert args.final_out == output / "final_candidates.csv"
+        assert args.pre_novelty_out.exists()
+        args.final_out.write_text("file,passes_novelty_filter\ncandidate.cif,True\n")
+        return {"status": "completed"}
+
+    monkeypatch.setattr(parallel_screening, "run_parallel_screening", thermal)
+    monkeypatch.setattr(pipeline, "finalize_novelty", novelty)
+    monkeypatch.chdir(tmp_path)
+    pipeline.main(["--workdir", str(tmp_path), "--stage2-csv", str(stage2),
+                   "--output-dir", str(output), "--gpu-workers", "2"])
+    assert events == ["voltage", "novelty"]
+    assert (output / "pre_novelty_candidates.csv").exists()
+
+
+def test_novelty_failure_aborts_pipeline_finalize(tmp_path):
+    args = pipeline.parse_args([])
+    args.pre_novelty_out = tmp_path / "voltage_pass.csv"
+    args.final_out = tmp_path / "final.csv"
+    args.novelty_audit = tmp_path / "audit.csv"
+    args.novelty_summary = tmp_path / "summary.json"
+    write_csv(args.pre_novelty_out, [{"file": "missing.cif", "path": str(tmp_path / "missing.cif")}])
+    args.final_out.write_text("file\nstale.cif\n")
+    with pytest.raises(RuntimeError, match="Novelty screening incomplete"):
+        pipeline.finalize_novelty(args, tmp_path)
+    with args.final_out.open() as fh:
+        assert list(csv.DictReader(fh)) == []
+    assert json.loads(args.novelty_summary.read_text())["status"] == "incomplete"
+
+
+def test_explicit_skip_does_not_claim_novelty(tmp_path):
+    args = pipeline.parse_args(["--skip-novelty"])
+    args.pre_novelty_out = tmp_path / "voltage_pass.csv"
+    args.final_out = tmp_path / "final.csv"
+    args.novelty_summary = tmp_path / "summary.json"
+    write_csv(args.pre_novelty_out, [{"file": "candidate.cif", "path": "/candidate.cif"}])
+    summary = pipeline.finalize_novelty(args, tmp_path)
+    assert summary["status"] == "skipped"
+    with args.final_out.open() as fh:
+        row = next(csv.DictReader(fh))
+    assert row["novelty_status"] == "not_checked"
+    assert row["passes_novelty_filter"] == "False"
+
+
+def test_novelty_output_cannot_overwrite_stage2_input(tmp_path, monkeypatch):
+    stage2 = tmp_path / "input.csv"
+    stage2.write_text("protected input\n")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="must not overwrite"):
+        pipeline.main(["--workdir", str(tmp_path), "--stage2-csv", str(stage2),
+                       "--output-dir", str(tmp_path / "out"), "--final-out", str(stage2)])
+    assert stage2.read_text() == "protected input\n"
+
+
+@pytest.mark.parametrize("output_option", ["--final-out", "--pre-novelty-out", "--novelty-audit", "--novelty-summary"])
+def test_novelty_output_cannot_delete_generated_source_structures(tmp_path, monkeypatch, output_option):
+    source = tmp_path / "relaxed.extxyz"
+    source.write_text("protected generated structures\n")
+    stage2 = tmp_path / "stage2.csv"
+    write_csv(stage2, [{"quick_score": 1, "path": str(source), "frame": 0,
+                       "score_kind": "li_periodic_geometry_proxy_v1"}])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="must not overwrite source structures"):
+        pipeline.main(["--workdir", str(tmp_path), "--stage2-csv", str(stage2),
+                       "--output-dir", str(tmp_path / "out"), output_option, str(source)])
+    assert source.read_text() == "protected generated structures\n"
+
+
+def test_missing_novelty_dataset_reason_is_reported_by_pipeline(tmp_path):
+    from pymatgen.core import Lattice, Structure
+
+    structure = tmp_path / "candidate.cif"
+    Structure(Lattice.cubic(3.4), ["Li", "Cl"], [[0, 0, 0], [.5, .5, .5]]).to(filename=str(structure))
+    args = pipeline.parse_args([])
+    args.pre_novelty_out = tmp_path / "voltage_pass.csv"
+    args.final_out = tmp_path / "final.csv"
+    args.novelty_audit = tmp_path / "audit.csv"
+    args.novelty_summary = tmp_path / "summary.json"
+    args.novelty_training_data = [tmp_path / "missing_train.zip"]
+    args.novelty_reference_data = [tmp_path / "missing_reference.gz"]
+    write_csv(args.pre_novelty_out, [{"file": structure.name, "path": str(structure)}])
+    with pytest.raises(RuntimeError, match="source_file_unavailable.*Required structure dataset file is missing") as exc:
+        pipeline.finalize_novelty(args, tmp_path)
+    assert "missing_train.zip" in str(exc.value)
+    assert "missing_reference.gz" in str(exc.value)
+    with args.final_out.open() as fh:
+        assert list(csv.DictReader(fh)) == []
+
+
+@pytest.mark.parametrize("arguments", [["--novelty-training-splits", ""],
+    ["--novelty-training-splits", "train,train"],
+    ["--skip-novelty", "--novelty-training-data", "/train.zip"]])
+def test_invalid_novelty_cli_configuration_is_rejected(arguments):
+    with pytest.raises(SystemExit):
+        pipeline.parse_args(arguments)
