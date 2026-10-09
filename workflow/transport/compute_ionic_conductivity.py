@@ -64,6 +64,19 @@ def load_md_candidates(csv_path: Path | str) -> List[Dict[str, str]]:
             accepted.append(row)
     return accepted
 
+def candidate_cif_path(row: Dict[str, str], csv_path: Path | str, cif_dir: Path | str) -> Path:
+    """Use the audited geometry; never replace a missing optimized CIF silently."""
+    recorded = (row.get("path") or "").strip()
+    if not recorded:
+        return Path(cif_dir) / row["file"]
+    path = Path(recorded).expanduser()
+    if not path.is_absolute():
+        path = Path(csv_path).resolve().parent / path
+    if path.name != row["file"] or path.suffix.lower() != ".cif":
+        raise ValueError(f"Audited CIF path does not match candidate {row['file']}: {path}")
+    return path
+
+
 def run_md(struct: Structure, temp: float, timestep_fs: float,
            total_ps: float, replicate: int, calculator: CHGNetCalculator, model: CHGNet,
            log_interval: int, traj_path: Path, log_path: Path,
@@ -267,7 +280,11 @@ def main(argv=None):
         args.equil_ps * 1000.0 / (args.timestep_fs * args.log_interval)
     ) if args.equil_ps > 0 else 0
     for idx, row in enumerate(rows):
-        cif_path = Path(args.cif_dir) / row["file"]
+        try:
+            cif_path = candidate_cif_path(row, args.csv, args.cif_dir)
+        except ValueError as exc:
+            print(f"[WARN] {exc}")
+            continue
         if not cif_path.exists():
             print(f"[WARN] missing CIF {cif_path}")
             continue

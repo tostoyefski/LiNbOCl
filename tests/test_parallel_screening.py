@@ -17,9 +17,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "workflow" / "pipeline"
 sys.path.insert(0, str(SCRIPTS))
 
 import compute_ehull_chgnet as hull_helpers
+import compute_voltage_window as voltage_helpers
 import parallel_screening as screening
 import parallel_utils
 import run_top300_pipeline as pipeline
+import mattersim_relaxation as relaxation_helpers
 
 
 def structure(species):
@@ -38,7 +40,15 @@ def candidate_task(index, species, directory=Path("/selected")):
 
 
 def prediction(task, energy_per_atom, error=None):
-    return {"id": task["id"], "energy_per_atom": energy_per_atom, "error": error}
+    optimized = Structure.from_dict(task["structure"])
+    optimized.scale_lattice(optimized.volume * 1.331)
+    return {"id": task["id"], "energy_per_atom": energy_per_atom,
+            "structure": optimized.as_dict(),
+            "relaxation": {"status": "converged", "converged": True,
+                           "settings": relaxation_helpers.RelaxationSettings().as_dict(),
+                           "optimizer": "FIRE", "cell_filter": "ExpCellFilter", "relax_cell": True,
+                           "scalar_pressure_eV_A3": 0.0, "constrain_symmetry": False,
+                           "steps": 1, "fmax_final": .01}, "error": error}
 
 
 def unary_references():
@@ -128,6 +138,37 @@ def test_missing_unary_reference_rejects_common_hull():
                                 {"Cl-Li": [PDEntry("LiCl", -2)]})
 
 
+def test_generated_phase_from_a_subset_system_competes_in_superset_hull():
+    binary = candidate_task(0, ["Li", "Li", "Cl"])
+    ternary = {**candidate_task(1, ["Li", "Cl", "O"]), "chemsys": "Cl-Li-O"}
+    tasks = [binary, ternary]
+    values = {binary["id"]: prediction(binary, -5 / 3), ternary["id"]: prediction(ternary, -2 / 3)}
+    references = {**unary_references(), "Cl-Li-O": unary_references()["Cl-Li"] + [PDEntry("O", 0)]}
+    rows, _ = screening.calculate_hull(tasks, values, references)
+    assert rows[1]["energy_above_hull_eV"] == pytest.approx(1 / 6)
+    isolated, _ = screening.calculate_hull([ternary], values, references)
+    assert isolated[0]["energy_above_hull_eV"] == 0
+
+
+@pytest.mark.parametrize("invalid", ["legacy_energy_only", "wrong_settings", "changed_composition", "wrong_id"])
+def test_untrusted_worker_preparation_cannot_enter_common_hull(invalid):
+    task = candidate_task(0, ["Li", "Cl"])
+    value = prediction(task, -1)
+    if invalid == "legacy_energy_only":
+        value = {"id": task["id"], "energy_per_atom": -1, "error": None}
+    elif invalid == "wrong_settings":
+        value["relaxation"]["settings"]["fmax"] = .2
+    elif invalid == "changed_composition":
+        value["structure"] = structure(["Li", "Li"]).as_dict()
+    else:
+        value["id"] = "another-candidate"
+    rows, entries = screening.calculate_hull([task], {task["id"]: value}, unary_references(),
+                                             relaxation_helpers.RelaxationSettings().as_dict())
+    assert not entries
+    assert rows[0]["calculation_status"] == "calculation_failed"
+    assert rows[0]["error"]
+
+
 def voltage_context(entries):
     return {
         "base_entries": {"Cl-Li": [entry.as_dict() for entry in entries]},
@@ -212,6 +253,7 @@ def test_integrated_four_gpu_screening_preserves_global_hull_and_failure_audit(t
         shard_calls.append((workers, mode, devices))
         assert workers == 4
         if mode == "predict":
+            assert context == {"relaxation_settings": relaxation_helpers.RelaxationSettings().as_dict()}
             energies = {"candidate:0": -1, "candidate:1": -5 / 3,
                         "candidate:2": None, "reference:Cl-Li:0": -1, "reference:Cl-Li:1": 0}
             # Completion order differs from manifest order, as it does on real GPUs.
@@ -229,7 +271,10 @@ def test_integrated_four_gpu_screening_preserves_global_hull_and_failure_audit(t
     )
     screening.run_parallel_screening(args, export / "index.csv", tmp_path)
     hull = read_rows(args.ehull_out)
-    assert [row["path"] for row in hull] == [str(path) for path, _ in candidates]
+    assert [row["source_path"] for row in hull] == [str(path) for path, _ in candidates]
+    assert [row["path"] for row in hull[:2]] == [
+        str(tmp_path / "relaxation/candidates" / path.name) for path, _ in candidates[:2]]
+    assert Structure.from_file(hull[0]["path"]).lattice.a == pytest.approx(6.6)
     assert float(hull[0]["energy_above_hull_eV"]) == pytest.approx(0.25)
     assert hull[2]["calculation_status"] == "calculation_failed"
     assert hull[2]["error"] == "synthetic candidate failure"
@@ -244,6 +289,29 @@ def test_integrated_four_gpu_screening_preserves_global_hull_and_failure_audit(t
     assert summary["selected"] == 3
     assert summary["energy_failures"] == 1
     assert summary["hull_passed"] == summary["voltage_evaluated"] == 1
+    snapshot = json.loads((tmp_path / "relaxation/reference_entries.json").read_text())
+    assert snapshot["energy_model"] == "CHGNet-0.3.0"
+    assert len(snapshot["candidates"]) == len(snapshot["references"]) == 2
+    assert len(snapshot["entries_by_chemsys"]["Cl-Li"]) == 4
+    assert {entry["name"] for entry in snapshot["entries_by_chemsys"]["Cl-Li"]} == {
+        "candidate:0", "candidate:1", "reference:Cl-Li:0", "reference:Cl-Li:1"}
+    assert len(read_rows(tmp_path / "relaxation/audit.csv")) == 5
+    for value in snapshot["candidates"] + snapshot["references"]:
+        assert value["structure_sha256"] == hull_helpers.structure_file_sha256(value["path"])
+    # The serial voltage entry point accepts a parallel preparation without
+    # refetching MP phases, re-relaxing structures, or loading an energy model.
+    settings = relaxation_helpers.RelaxationSettings()
+    snapshot_path = tmp_path / "relaxation/reference_entries.json"
+    cached = voltage_helpers.load_reference_snapshot(snapshot_path, settings)
+    cached_entries, cached_candidates = voltage_helpers.snapshot_phase_entries(cached, "Cl-Li", settings)
+    candidate, index = voltage_helpers.validated_snapshot_candidate(
+        read_rows(args.filtered_out)[0], cached_candidates, cached_entries, settings, snapshot_path)
+    assert candidate.structure.lattice.a == pytest.approx(6.6)
+    assert cached_entries[index].name == "candidate:1"
+    assert len(cached_entries) == 4
+    audit = json.loads((tmp_path / "relaxation/audit.json").read_text())
+    assert audit["relaxation_settings"] == settings.as_dict()
+    assert len(audit["records"]) == 5
 
 
 @pytest.fixture
@@ -346,6 +414,39 @@ def test_zero_hull_pass_writes_empty_tables_without_starting_voltage_workers(
     assert summary["energy_failures"] == summary["hull_passed"] == summary["voltage_evaluated"] == 0
 
 
+def test_failed_reference_relaxation_is_audited_and_aborts_all_common_hulls(
+    tmp_path, monkeypatch, integrated_screening,
+):
+    args = integrated_screening
+    stages = []
+    def run_shards(tasks, workers, directory, mode, script, workdir, devices=None, context=None):
+        stages.append(mode)
+        assert mode == "predict", "Reference failures must prevent voltage work"
+        records = [prediction(task, -1 if task["id"] == "reference:Cl-Li:0" else 0) for task in tasks]
+        bad = next(record for record in records if record["id"] == "reference:Cl-Li:1")
+        bad.update(energy_per_atom=None, structure=None, error="MatterSim reference did not converge")
+        bad["relaxation"].update(status="failed", converged=False)
+        return records
+    monkeypatch.setattr(parallel_utils, "run_shards", run_shards)
+    args.final_out.write_text("file\nprevious.cif\n")
+    with pytest.raises(RuntimeError, match="Incomplete competing-phase"):
+        screening.run_parallel_screening(args, args.export_dir / "index.csv", tmp_path)
+    assert stages == ["predict"]
+    assert not args.final_out.exists()
+    assert not args.voltage_out.exists()
+    assert all(row["calculation_status"] == "calculation_failed" for row in read_rows(args.ehull_out))
+    assert read_rows(args.filtered_out) == []
+    snapshot = json.loads((tmp_path / "relaxation/reference_entries.json").read_text())
+    assert snapshot["entries_by_chemsys"] == {}
+    assert snapshot["systems"]["Cl-Li"]["status"] == "calculation_failed"
+    audit = read_rows(tmp_path / "relaxation/audit.csv")
+    failed = next(row for row in audit if row["id"] == "reference:Cl-Li:1")
+    assert failed["relaxation_status"] == "failed"
+    assert failed["energy_per_atom_eV"] == ""
+    assert "did not converge" in failed["error"]
+    assert len(audit) == 5
+
+
 def test_gpu_worker_cli_defaults_to_serial_and_accepts_four_workers():
     assert pipeline.parse_args([]).gpu_workers == 1
     assert pipeline.parse_args(["--gpu-workers", "4"]).gpu_workers == 4
@@ -375,10 +476,26 @@ def test_prediction_worker_uses_isolated_logical_gpu_and_records_each_task_failu
     outcomes = [-1, float("nan"), RuntimeError("synthetic prediction failure"), float("inf"), -2]
     loaded = []
     predicted_sizes = []
+    relaxed_sizes, relaxer_initializations = [], []
+    class FakeRelaxer:
+        def __init__(self, settings, device):
+            self.settings = settings
+            relaxer_initializations.append((settings.as_dict(), device))
+        def relax(self, value):
+            relaxed_sizes.append(len(value))
+            optimized = value.copy()
+            optimized.scale_lattice(value.volume * 1.331)
+            return optimized, {"status": "converged", "converged": True,
+                               "settings": self.settings.as_dict(),
+                               "optimizer": "FIRE", "cell_filter": "ExpCellFilter", "relax_cell": True,
+                               "scalar_pressure_eV_A3": 0.0, "constrain_symmetry": False,
+                               "steps": 1, "fmax_final": .01}
+    monkeypatch.setattr(relaxation_helpers, "MatterSimRelaxer", FakeRelaxer)
     class FakeModel:
         def parameters(self):
             return iter([SimpleNamespace(device="cuda:0")])
         def predict_structure(self, value):
+            assert value.lattice.a == pytest.approx(6.6)
             predicted_sizes.append(len(value))
             outcome = outcomes[len(predicted_sizes) - 1]
             if isinstance(outcome, Exception):
@@ -395,6 +512,8 @@ def test_prediction_worker_uses_isolated_logical_gpu_and_records_each_task_failu
     records = screening.predict_worker(tasks)
     assert loaded == [{"model_name": "0.3.0", "use_device": "cuda:0", "check_cuda_mem": False}]
     assert predicted_sizes == [2, 3, 4, 5, 6]
+    assert relaxed_sizes == predicted_sizes
+    assert relaxer_initializations == [(relaxation_helpers.RelaxationSettings().as_dict(), "cuda:0")]
     assert [record["id"] for record in records] == [task["id"] for task in tasks]
     assert records[0]["energy_per_atom"] == -1
     assert records[-1]["energy_per_atom"] == -2

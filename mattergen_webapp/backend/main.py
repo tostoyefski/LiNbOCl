@@ -307,11 +307,20 @@ class Top300Request(BaseModel):
     target_voltage: Optional[float] = None
     min_voltage_window: float = Field(0.0, ge=0)
     dry_run: bool = False
+    mattersim_checkpoint: str = Field(os.environ.get("MATTERSIM_CHECKPOINT", "MatterSim-v1.0.0-1M.pth"), min_length=1)
+    relax_fmax: float = Field(0.05, gt=0)
+    relax_steps: int = Field(500, ge=1)
 
-    @validator("ehull_threshold", "voltage_step", "voltage_threshold", "target_voltage", "min_voltage_window")
+    @validator("mattersim_checkpoint")
+    def _checkpoint_present(cls, v):
+        if not v.strip():
+            raise ValueError("MatterSim checkpoint must be a nonempty model name or path")
+        return v
+
+    @validator("ehull_threshold", "voltage_step", "voltage_threshold", "target_voltage", "min_voltage_window", "relax_fmax")
     def _finite_values(cls, v):
         if v is not None and not math.isfinite(v):
-            raise ValueError("screening thresholds and voltages must be finite")
+            raise ValueError("numeric screening settings must be finite")
         return v
 
 
@@ -487,6 +496,9 @@ def run_top300(payload: Top300Request):
         str(payload.voltage_threshold),
         "--min-voltage-window",
         str(payload.min_voltage_window),
+        "--mattersim-checkpoint", payload.mattersim_checkpoint,
+        "--relax-fmax", str(payload.relax_fmax),
+        "--relax-steps", str(payload.relax_steps),
     ]
     if payload.target_voltage is not None:
         cmd.extend(["--target-voltage", str(payload.target_voltage)])
@@ -687,6 +699,9 @@ def run_full(payload: FullPipelineRequest):
         str(top.voltage_threshold),
         "--min-voltage-window",
         str(top.min_voltage_window),
+        "--mattersim-checkpoint", top.mattersim_checkpoint,
+        "--relax-fmax", str(top.relax_fmax),
+        "--relax-steps", str(top.relax_steps),
     ]
     if top.target_voltage is not None:
         top_cmd.extend(["--target-voltage", str(top.target_voltage)])

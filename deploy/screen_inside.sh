@@ -20,5 +20,5 @@ if count!=6000: raise RuntimeError(f'Expected 6000 relaxed frames, got {count}')
 print('Verified 6000 generated and relaxed structures',flush=True)
 PY
 python "$repo/workflow/pipeline/screen_all_extxyz.py" --workdir "$repo/mattergen" --base "$root/_segments" --required-elements Li Nb O Cl --allowed-elements Li Nb O Cl --require-charge-balance --use-smact --light-oxy 0.05 0.35 --out "$root/stage2_candidates.csv" --screened-out "$root/screened_out.csv" --refs-out "$root/screen_refs.txt"
-python "$repo/workflow/pipeline/run_top300_pipeline.py" --workdir "$repo/mattergen" --stage2-csv "$root/stage2_candidates.csv" --output-dir "$root/top300_run" --topk 6000 --selection-mode diverse --ehull-threshold 0.05 --gpu-workers 2
+python "$repo/workflow/pipeline/run_top300_pipeline.py" --workdir "$repo/mattergen" --stage2-csv "$root/stage2_candidates.csv" --output-dir "$root/top300_run" --topk 6000 --selection-mode diverse --ehull-threshold 0.05 --gpu-workers 2 --mattersim-checkpoint "${MATTERSIM_CHECKPOINT:-$repo/_runtime/MatterSim-v1.0.0-1M.pth}" --relax-fmax "${RELAX_FMAX:-0.05}" --relax-steps "${RELAX_STEPS:-500}"
 date -u +%FT%TZ > "$root/SCREENING_COMPLETE"

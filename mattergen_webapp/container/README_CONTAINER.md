@@ -39,6 +39,8 @@ docker compose -f mattergen_webapp/container/docker-compose.yml up mattergen-web
 
 页面会从后端读取默认结果路径。使用其他运行目录时修改 Compose 的对应环境变量，表单中的生成、评估、筛选和 Top-K 路径需指向容器内路径。
 
+候选和 MP 竞争结构统一用 MatterSim 优化，再用 CHGNet 0.3.0 计算能量。Compose 的 `MATTERSIM_CHECKPOINT` 可使用默认模型名，或 `/runs/_runtime/` 内自备权重的容器绝对路径；CLI 还传入 `RELAX_FMAX`、`RELAX_STEPS`，默认 0.05 eV/Å、500 步。Web API 的优化参数见 [工作流指南](../../workflow/README.md#2-生成并运行全流程)。
+
 ## 3. 直接跑 CLI 全流程
 
 ```bash

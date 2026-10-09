@@ -40,6 +40,9 @@ VOLTAGE_THRESHOLD="${VOLTAGE_THRESHOLD:-0.001}"
 TARGET_VOLTAGE="${TARGET_VOLTAGE:-}"
 MIN_VOLTAGE_WINDOW="${MIN_VOLTAGE_WINDOW:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+MATTERSIM_CHECKPOINT="${MATTERSIM_CHECKPOINT:-MatterSim-v1.0.0-1M.pth}"
+RELAX_FMAX="${RELAX_FMAX:-0.05}"
+RELAX_STEPS="${RELAX_STEPS:-500}"
 
 export TMPDIR="$RUNTIME_ROOT/tmp"
 export TMP="$RUNTIME_ROOT/tmp"
@@ -150,6 +153,9 @@ top_cmd=(
   --voltage-out "$RESULTS_ROOT/top300_run/chgnet_voltage_window_top300.csv"
   --voltage-threshold "$VOLTAGE_THRESHOLD"
   --min-voltage-window "$MIN_VOLTAGE_WINDOW"
+  --mattersim-checkpoint "$MATTERSIM_CHECKPOINT"
+  --relax-fmax "$RELAX_FMAX"
+  --relax-steps "$RELAX_STEPS"
 )
 if [[ -n "$TARGET_VOLTAGE" ]]; then
   top_cmd+=(--target-voltage "$TARGET_VOLTAGE")

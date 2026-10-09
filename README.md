@@ -2,6 +2,8 @@
 
 从这里开始。所有项目脚本集中在 [`workflow/`](workflow/README.md)，Web、HPC 和容器共用同一套流程。
 
+体相与电压筛选使用统一基线：新候选和 Materials Project 竞争结构都以相同 MatterSim 设置优化原子与晶胞，再由 CHGNet 0.3.0 计算能量。电压复用体相阶段的优化结构及能量快照；失败或未收敛结果不会通过。参数与结果文件见 [操作指南](workflow/README.md)。
+
 ```text
 LiNbOCl/
 ├── workflow/              操作指南与项目脚本
@@ -55,5 +57,7 @@ uvicorn main:app --app-dir mattergen_webapp/backend --host 0.0.0.0 --port 8000
 ## 从旧版本迁移
 
 旧 `mattergen/` 根目录和 Web 的脚本副本已整理到 `workflow/`，请更新自定义命令的路径。历史 stage2 CSV 必须从已有 `relaxed.extxyz` 重跑筛选，生成 `score_kind=li_periodic_geometry_proxy_v1` 后再运行 Top-K。
+
+旧凸包/电压 CSV 未记录统一优化快照，不能直接用于新电压流程；已有候选可重跑 Top-K，无需重新生成。
 
 已移除旧生成脚本、混合能量基线的 `run_chgnet_phase.py`、重复指标汇总和针对历史 results200/results10 的分析脚本。删除详情及保留工具见 [操作指南](workflow/README.md#整理说明)；旧文件可从 Git 历史查找。

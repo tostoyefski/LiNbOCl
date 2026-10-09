@@ -67,7 +67,7 @@ def invoke_hpc(tmp_path, overrides):
     scripts = workflow / "pipeline"
     scripts.mkdir(parents=True)
     for name in ("run_full_pipeline.sh", "generate.sh", "evaluate.sh", "screen_all_extxyz.py",
-                 "run_top300_pipeline.py", "candidate_selection.py", "export_refs_to_structs.py"):
+                 "run_top300_pipeline.py", "candidate_selection.py", "mattersim_relaxation.py", "export_refs_to_structs.py"):
         shutil.copyfile(SCRIPTS / name, scripts / name)
     (project / "results").mkdir()
     mattergen = project / "mattergen"

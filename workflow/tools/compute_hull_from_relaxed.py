@@ -18,7 +18,7 @@
 
                       返回的竞争相一起建相图（同一修正，基线可比）。
 
-  2) --mode chgnet  : 全部用 CHGNet (ASE Calculator) 预测能量（你的候选 + MP 竞争相结构），
+  2) --mode chgnet  : 候选与 MP 竞争相统一经 MatterSim 晶胞/原子弛豫后，用 CHGNet 单点预测能量，
 
                       在同一 ML 基线上构造“模型凸包”。适合前期大批量筛选。
 
@@ -55,6 +55,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
+import sys
+import tempfile
+import numpy as np
 
 import csv
 
@@ -84,9 +89,15 @@ from pymatgen.entries.compatibility import MaterialsProject2020Compatibility
 
 from pymatgen.analysis.phase_diagram import PhaseDiagram
 
+PIPELINE_DIR = Path(__file__).resolve().parents[1] / "pipeline"
+sys.path.insert(0, str(PIPELINE_DIR))
+from mattersim_relaxation import (MatterSimRelaxer, add_relaxation_arguments,
+                                 settings_from_args, save_relaxed_structure)
+ENERGY_MODEL = "CHGNet-0.3.0"
 
 
-def parse_args():
+
+def parse_args(argv=None):
 
     p = argparse.ArgumentParser()
 
@@ -114,7 +125,13 @@ def parse_args():
 
                    help="仅用于 --mode chgnet。每个化学体系最多采样的 MP 竞争相数量（默认不限）。")
 
-    return p.parse_args()
+    add_relaxation_arguments(p)
+    args = p.parse_args(argv)
+    try:
+        settings_from_args(args)
+    except ValueError as exc:
+        p.error(str(exc))
+    return args
 
 
 
@@ -228,50 +245,114 @@ def chgnet_energy_for_structure(struct: Structure, calc: CHGNetCalculator) -> fl
 
     atoms.calc = calc
 
-    # 允许 CHGNet 自己构图；如出现孤立原子，ASE/CHGNet 会给出警告
     e = float(atoms.get_potential_energy())
-
+    if not math.isfinite(e):
+        raise ValueError("CHGNet produced a non-finite single-point energy")
     return e
 
 
 
 
 
-def build_entries_chgnet(frames, device: Optional[str] = None) -> Dict[str, List[ComputedStructureEntry]]:
-
-    """
-
-    用 CHGNet 为候选结构取能量，并按化学体系分组（纯 ML 基线）。
-
-    """
-
+def _chgnet_calculator(device=None):
+    from chgnet.model import CHGNet
     from chgnet.model.dynamics import CHGNetCalculator
+    model = CHGNet.load(model_name="0.3.0", use_device=device)
+    return CHGNetCalculator(model=model, use_device=device)
 
-    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)
 
+def _structure_source_id(struct):
+    source_id = getattr(struct, "properties", {}).get("source_id")
+    if source_id:
+        return str(source_id)
+    fingerprint = json.dumps({"composition": struct.composition.get_el_amt_dict(),
+                              "lattice": struct.lattice.matrix.tolist(),
+                              "frac_coords": struct.frac_coords.tolist()}, sort_keys=True)
+    return "reference:" + hashlib.sha256(fingerprint.encode()).hexdigest()
+
+
+def _trace_paths(output_dir, kind, source_id):
+    if output_dir is None:
+        return None, None
+    folder = Path(output_dir) / kind
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = hashlib.sha256(source_id.encode()).hexdigest()[:24]
+    return folder / (stem + ".cif"), folder / (stem + ".audit.json")
+
+
+def _write_trace(path, trace):
+    if path is None:
+        return
+    fd, name = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(trace, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _verify_relaxed(original, relaxed, audit, settings):
+    if audit.get("status") != "converged" or audit.get("converged") is not True:
+        raise ValueError("MatterSim relaxation did not return a verified converged audit")
+    if audit.get("settings") != settings:
+        raise ValueError("MatterSim relaxation settings differ from the shared settings")
+    if not isinstance(relaxed, Structure) or not relaxed.is_ordered or not relaxed.num_sites:
+        raise ValueError("MatterSim returned an invalid structure")
+    if relaxed.composition.get_el_amt_dict() != original.composition.get_el_amt_dict():
+        raise ValueError("MatterSim relaxation changed composition")
+    if not np.isfinite(relaxed.lattice.matrix).all() or not np.isfinite(relaxed.cart_coords).all() or not math.isfinite(relaxed.volume) or relaxed.volume <= 0:
+        raise ValueError("MatterSim returned non-finite or invalid geometry")
+    if not math.isfinite(float(audit.get("fmax_final", math.nan))) or audit["fmax_final"] > settings["fmax"] * (1 + 1e-7):
+        raise ValueError("MatterSim final forces do not satisfy the configured threshold")
+
+
+def _failure_trace(trace, exc):
+    trace.update(status="calculation_failed", error=f"{type(exc).__name__}: {exc}")
+    if hasattr(exc, "audit"):
+        trace["relaxation_audit"] = exc.audit
+    return trace
+
+
+def build_entries_chgnet(frames, device: Optional[str] = None, relaxer=None,
+                         output_dir=None) -> Dict[str, List[ComputedStructureEntry]]:
+    """MatterSim-relax every candidate, then use CHGNet single-point energy.
+
+    Candidate failures are explicitly audited and excluded. The same relaxer
+    must also be supplied to ``entries_from_structures_with_chgnet`` for MP.
+    """
+    relaxer = relaxer if relaxer is not None else MatterSimRelaxer(device=device)
+    settings = relaxer.settings.as_dict()
+    calc = None
     groups = defaultdict(list)
-
-
-    import math
     for ext_path, idx, struct in frames:
+        uid = f"{ext_path}#{idx}"
+        cif_path, audit_path = _trace_paths(output_dir, "candidates", uid)
+        trace = {"source_id": uid, "source_path": str(ext_path), "frame": idx,
+                 "path": None, "settings": settings, "status": "calculation_failed",
+                 "energy_model": ENERGY_MODEL,
+                 "formula": struct.composition.reduced_formula, "chemsys": get_chemsys(struct)}
         try:
-            e = chgnet_energy_for_structure(struct, calc)
-            if not (isinstance(e, (int, float)) and math.isfinite(e)):
-                print(f"[WARN] 非有限能量，跳过：{ext_path}#{idx}  -> {e}")
-                continue
-        except Exception as eerr:
-            print(f"[WARN] CHGNet 取能失败：{ext_path}#{idx} -> {eerr}")
-            continue
-        ce = ComputedStructureEntry(structure=struct, energy=e)
-
-        cs = get_chemsys(struct)
-
-        groups[cs].append(ce)
-
+            relaxed, audit = relaxer.relax(struct)
+            trace["relaxation_audit"] = audit
+            _verify_relaxed(struct, relaxed, audit, settings)
+            if cif_path is not None:
+                save_relaxed_structure(relaxed, cif_path)
+                trace["path"] = str(cif_path.resolve())
+            if calc is None:
+                calc = _chgnet_calculator(device)
+            energy = chgnet_energy_for_structure(relaxed, calc)
+            if not math.isfinite(energy):
+                raise ValueError("CHGNet produced a non-finite single-point energy")
+            trace.update(status="complete", energy_total_eV=energy)
+            entry = ComputedStructureEntry(relaxed, energy, entry_id=uid, data=trace.copy())
+            _write_trace(audit_path, trace)
+            groups[get_chemsys(relaxed)].append(entry)
+        except Exception as exc:
+            _write_trace(audit_path, _failure_trace(trace, exc))
+            print(f"[WARN] MatterSim/CHGNet candidate failed and was excluded: {uid} -> {exc}")
     return groups
-
-
-
 
 
 def fetch_mp_competitors_entries(chemsys: str, mpr: MPRester) -> List:
@@ -291,6 +372,15 @@ def fetch_mp_competitors_entries(chemsys: str, mpr: MPRester) -> List:
 
 
 
+
+
+def _mp_reference_structures(docs):
+    structures = []
+    for doc in docs:
+        struct = doc.structure.copy()
+        struct.properties["source_id"] = str(doc.material_id)
+        structures.append(struct)
+    return structures
 
 
 def fetch_mp_competitors_structures(chemsys: str, mpr, limit: Optional[int] = None) -> List[Structure]:
@@ -335,47 +425,89 @@ def fetch_mp_competitors_structures(chemsys: str, mpr, limit: Optional[int] = No
                     continue
                 out_docs.append(d); seen_mids.add(d.material_id)
                 if limit is not None and len(out_docs) >= limit:
-                    return [doc.structure for doc in out_docs]
+                    return _mp_reference_structures(out_docs)
 
-    return [doc.structure for doc in out_docs]
-
-
+    return _mp_reference_structures(out_docs)
 
 
 
-def entries_from_structures_with_chgnet(structs: List[Structure], device: Optional[str] = None) -> List[ComputedStructureEntry]:
 
-    from chgnet.model.dynamics import CHGNetCalculator
 
-    calc = CHGNetCalculator() if device is None else CHGNetCalculator(use_device=device)
-
+def entries_from_structures_with_chgnet(structs: List[Structure], device: Optional[str] = None,
+                                      relaxer=None, output_dir=None) -> List[ComputedStructureEntry]:
+    """Uniformly relax/score every reference; any failure aborts the phase set."""
+    relaxer = relaxer if relaxer is not None else MatterSimRelaxer(device=device)
+    settings = relaxer.settings.as_dict()
+    calc = None
     entries = []
-
-    import math
-    for s in structs:
-
+    for struct in structs:
+        source_id = _structure_source_id(struct)
+        cif_path, audit_path = _trace_paths(output_dir, "references", source_id)
+        trace = {"source_id": source_id, "source_path": source_id, "path": None,
+                 "settings": settings, "status": "calculation_failed",
+                 "energy_model": ENERGY_MODEL,
+                 "formula": struct.composition.reduced_formula, "chemsys": get_chemsys(struct)}
         try:
-
-            e = chgnet_energy_for_structure(s, calc)
-
-            if not (isinstance(e, (int,float)) and math.isfinite(e)):
-                print("[WARN] 竞争相能量为非有限值，跳过")
-                continue
-            entries.append(ComputedStructureEntry(s, e))
-
-        except Exception as eerr:
-
-            print(f"[WARN] 竞争相 CHGNet 取能失败：{eerr}")
-
+            relaxed, audit = relaxer.relax(struct)
+            trace["relaxation_audit"] = audit
+            _verify_relaxed(struct, relaxed, audit, settings)
+            if cif_path is not None:
+                save_relaxed_structure(relaxed, cif_path)
+                trace["path"] = str(cif_path.resolve())
+            if calc is None:
+                calc = _chgnet_calculator(device)
+            energy = chgnet_energy_for_structure(relaxed, calc)
+            if not math.isfinite(energy):
+                raise ValueError("CHGNet produced a non-finite single-point energy")
+            trace.update(status="complete", energy_total_eV=energy)
+            entry = ComputedStructureEntry(relaxed, energy, entry_id=source_id, data=trace.copy())
+            _write_trace(audit_path, trace)
+            entries.append(entry)
+        except Exception as exc:
+            _write_trace(audit_path, _failure_trace(trace, exc))
+            raise RuntimeError(f"Competing MP reference failed MatterSim/CHGNet; phase diagram aborted: {source_id}") from exc
     return entries
 
 
+def _entry_provenance(entry):
+    data = entry.data or {}
+    audit = data.get("relaxation_audit", {})
+    return {"source_id": data.get("source_id", entry.entry_id or ""),
+            "source_path": data.get("source_path", ""), "path": data.get("path", ""),
+            "relaxation_settings": json.dumps(data.get("settings", {}), sort_keys=True),
+            "relaxation_status": audit.get("status", "not_applicable"),
+            "energy_model": data.get("energy_model", "MP/DFT"),
+            "calculation_status": data.get("status", "complete"), "error": data.get("error", "")}
 
 
+def _candidate_failure_rows(frames, output_dir):
+    rows = []
+    for ext_path, index, _ in frames:
+        uid = f"{ext_path}#{index}"
+        _, audit_path = _trace_paths(output_dir, "candidates", uid)
+        if not audit_path.exists():
+            continue
+        trace = json.loads(audit_path.read_text())
+        if trace.get("status") == "complete":
+            continue
+        rows.append({"chemsys": trace.get("chemsys", ""), "formula": trace.get("formula", ""),
+                     "source_id": uid, "source_path": trace.get("source_path", ""),
+                     "path": trace.get("path") or "",
+                     "relaxation_settings": json.dumps(trace.get("settings", {}), sort_keys=True),
+                     "relaxation_status": trace.get("relaxation_audit", {}).get("status", "failed"),
+                     "energy_model": trace.get("energy_model", ENERGY_MODEL),
+                     "calculation_status": "calculation_failed", "error": trace.get("error", "")})
+    return rows
 
-def main():
 
-    args = parse_args()
+def main(argv=None):
+
+    args = parse_args(argv)
+
+    if args.mode == "chgnet":
+        # A failed ML rerun must not leave an older successful hull CSV looking
+        # current. The DFT branch retains its existing output semantics.
+        Path(args.out).unlink(missing_ok=True)
 
     from mp_api.client import MPRester
 
@@ -392,6 +524,8 @@ def main():
 
 
     # 组装候选 entries
+    relaxation_dir = Path(args.out).resolve().parent / "relaxation" / "all_frames"
+    relaxer = None
 
     if args.mode == "mp":
 
@@ -405,13 +539,14 @@ def main():
 
     else:  # chgnet
 
-        grouped_entries = build_entries_chgnet(frames)
+        relaxer = MatterSimRelaxer(settings=settings_from_args(args))
+        grouped_entries = build_entries_chgnet(frames, relaxer=relaxer, output_dir=relaxation_dir)
 
 
 
     # 逐化学体系构建相图并评估
 
-    out_rows = []
+    out_rows = _candidate_failure_rows(frames, relaxation_dir) if args.mode == "chgnet" else []
 
     with MPRester(api_key=args.mp_api_key) as mpr:
 
@@ -433,7 +568,7 @@ def main():
 
                 comp_structs = fetch_mp_competitors_structures(csys, mpr, args.max_mp_competitors)
 
-                comp_entries = entries_from_structures_with_chgnet(comp_structs)
+                comp_entries = entries_from_structures_with_chgnet(comp_structs, relaxer=relaxer, output_dir=relaxation_dir)
 
             # 假设变量名分别是：
             #   csys: 当前的 "Li-Cl-..." 字符串
@@ -476,7 +611,7 @@ def main():
 
                     is_stable = (e_above <= 1e-6)
 
-                    decomp = pd.get_decomposition(ce)
+                    decomp = pd.get_decomposition(ce.composition)
                     parts = []
                     for k, amt in decomp.items():
                         # k 可能是 Entry（有 composition），也可能是 Composition/Formula-like
@@ -491,6 +626,8 @@ def main():
                     decomp_str = " + ".join(parts)
 
                     out_rows.append({
+
+                        **_entry_provenance(ce),
 
                         "chemsys": csys,
 
@@ -526,7 +663,10 @@ def main():
 
                   "energy_eV_per_atom", "formation_energy_per_atom",
 
-                  "energy_above_hull", "is_stable", "decomposition"]
+                  "energy_above_hull", "is_stable", "decomposition",
+                  "source_id", "source_path", "path", "relaxation_settings",
+                  "relaxation_status", "calculation_status", "error"]
+    fieldnames.append("energy_model")
 
     with open(args.out, "w", newline="") as f:
 
@@ -549,5 +689,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-
-

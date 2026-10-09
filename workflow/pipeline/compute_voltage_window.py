@@ -2,18 +2,18 @@
 """Evaluate high-voltage stability windows for CHGNet-screened candidates.
 
 The workflow consumes a CSV (e.g. ``chgnet_hull_results_stable.csv``) and, for each
-entry, assembles the relevant competing phases in the same chemical system. All
-energies are (re-)evaluated on a consistent CHGNet baseline so that formation
-energies and grand-potential hulls can be compared fairly. A voltage grid is then
+entry, reuses the complete optimized phase set from the hull reference snapshot.
+Its candidate and MP geometries were optimized with identical MatterSim settings
+and evaluated with CHGNet-0.3.0. No reference refetch or energy prediction occurs.
+A voltage grid is then
 scanned to report contiguous intervals of stable sampled voltages. V_red and V_ox
 are the first and last stable grid points in the widest interval, with brackets
 and censor flags describing what the scan can establish about phase boundaries.
 An optional target voltage is evaluated directly, independently of grid spacing.
 
 Assumptions:
-    * A Materials Project API key is available via ``MP_API_KEY`` or
-      ``--mp-api-key``.
-    * CHGNet is installed and accessible in the current Python environment.
+    * The hull CSV and its reference snapshot were produced by the uniform
+      MatterSim → CHGNet pipeline with the same relaxation settings.
     * The working redox element (default Li) is present in the candidate and the
       competing phase set includes a unary reference for that element.
 
@@ -82,8 +82,13 @@ def positive_finite_float(value: str) -> float:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    from mattersim_relaxation import add_relaxation_arguments
     parser = argparse.ArgumentParser(
         description="Compute oxidation/reduction voltage limits for CHGNet candidates."
+    )
+    parser.add_argument(
+        "--reference-snapshot", type=Path, default=None,
+        help="Uniform optimized phase snapshot; default: <stable-csv parent>/relaxation/reference_entries.json.",
     )
     parser.add_argument(
         "--stable-csv",
@@ -93,7 +98,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--mp-api-key",
         default=os.environ.get("MP_API_KEY"),
-        help="Materials Project API key.",
+        help="Legacy argument retained for compatibility; unused by snapshot-only voltage analysis.",
     )
     parser.add_argument(
         "--working-element",
@@ -134,13 +139,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--max-mp-competitors",
         type=int,
         default=None,
-        help="Optional cap on MP competitor structures per chemical system (helps control runtime).",
+        help="Legacy argument retained for compatibility; cached phase sets are never capped or refetched here.",
     )
     parser.add_argument(
         "--out",
         default=str(DEFAULT_RESULTS / "chgnet_voltage_window_top300.csv"),
         help="Output CSV file with voltage window metrics.",
     )
+    add_relaxation_arguments(parser)
     args = parser.parse_args(argv)
     if args.voltage_max <= args.voltage_min:
         parser.error("--voltage-max must exceed --voltage-min")
@@ -395,124 +401,152 @@ def evaluate_voltage_window(
     return result
 
 
-def main() -> None:
-    args = parse_args()
+def load_reference_snapshot(path: Path, settings) -> Dict:
+    from compute_ehull_chgnet import ENERGY_MODEL
 
-    if not args.mp_api_key:
-        raise SystemExit("MP API key not provided. Use --mp-api-key or set MP_API_KEY.")
+    if not path.is_file():
+        raise ValueError(f"Uniform reference snapshot missing: {path}; rerun hull calculation")
+    with path.open() as handle:
+        snapshot = json.load(handle)
+    if snapshot.get("schema_version") != 1 or snapshot.get("energy_model") != ENERGY_MODEL:
+        raise ValueError("Old or incompatible energy snapshot; rerun uniform hull calculation")
+    if snapshot.get("relaxation_settings") != settings.as_dict():
+        raise ValueError("MatterSim snapshot settings mismatch; rerun hull calculation")
+    return snapshot
 
-    # Keep pure phase-diagram helpers importable without torch, CHGNet or an API
-    # client. These are needed only for the model/MP command-line workflow.
-    from chgnet.model import CHGNet
-    from mp_api.client import MPRester
 
-    from compute_ehull_chgnet import fetch_mp_competitor_structures, structures_to_entries
+def snapshot_phase_entries(snapshot: Dict, chemsys: str, settings):
+    """Check saved geometry/energy provenance for the complete cached diagram."""
+    from compute_ehull_chgnet import validate_relaxed_record
 
-    stable_csv = Path(args.stable_csv).expanduser()
+    state = snapshot.get("systems", {}).get(chemsys, {})
+    if state.get("status") != "complete":
+        raise ValueError(f"Reference snapshot incomplete for {chemsys}: {state.get('error')}")
+    entries = [PDEntry.from_dict(data) for data in snapshot["entries_by_chemsys"][chemsys]]
+    if not entries or any(not math.isfinite(entry.energy) for entry in entries):
+        raise ValueError("Empty or non-finite cached phase entries")
+    entries_by_id = {entry.name: entry for entry in entries}
+    if len(entries_by_id) != len(entries):
+        raise ValueError("Duplicate phase identifiers in reference snapshot")
+    elements = set(chemsys.split("-"))
+    references = [record for record in snapshot.get("references", []) if record["chemsys"] == chemsys]
+    if "fetched_count" in state and (
+        state["fetched_count"] != len(references) or state.get("prepared_count") != len(references)
+    ):
+        raise ValueError("Not every fetched MP competitor is present in the optimized snapshot")
+    candidates = [record for record in snapshot.get("candidates", [])
+                  if {el.symbol for el in Structure.from_dict(record["structure"]).composition.elements} <= elements]
+    records = references + candidates
+    if {record["id"] for record in records} != set(entries_by_id) or len(records) != len(entries):
+        raise ValueError("Reference snapshot does not contain the complete generated/reference phase set")
+    for record in records:
+        structure = validate_relaxed_record(record, settings)
+        entry = entries_by_id[record["id"]]
+        if entry.composition != structure.composition or not math.isclose(
+            entry.energy, float(record["energy_total_eV"]), rel_tol=1e-10, abs_tol=1e-8
+        ):
+            raise ValueError("Cached phase entry and optimized structure/energy disagree")
+    unary = {record_entry.composition.elements[0].symbol for record_entry in entries
+             if len(record_entry.composition.elements) == 1 and record_entry.name in {record["id"] for record in references}}
+    if elements - unary:
+        raise ValueError("Optimized unary references are missing")
+    return entries, candidates
+
+
+def validated_snapshot_candidate(row: Dict[str, str], records, entries, settings, snapshot_path: Path):
+    from compute_ehull_chgnet import ENERGY_MODEL, validate_relaxed_record
+
+    if row.get("relaxation_status") != "converged" or row.get("energy_model") != ENERGY_MODEL:
+        raise ValueError("Missing uniform MatterSim/CHGNet candidate metadata; rerun hull calculation")
+    if json.loads(row.get("relaxation_settings_json") or "null") != settings.as_dict():
+        raise ValueError("Candidate relaxation settings mismatch; rerun hull calculation")
+    audit = json.loads(row.get("relaxation_audit_json") or "null")
+    if not isinstance(audit, dict) or audit.get("status") != "converged" or audit.get("converged") is not True or audit.get("settings") != settings.as_dict():
+        raise ValueError("Missing or mismatched candidate convergence audit; rerun hull calculation")
+    if row.get("hull_status") not in {"complete", "success"} or row.get("error"):
+        raise ValueError("Candidate hull calculation failed")
+    declared = row.get("reference_snapshot_path")
+    if not declared or Path(declared).expanduser().resolve() != snapshot_path.resolve():
+        raise ValueError("Candidate belongs to a different or missing reference snapshot")
+    path = Path(row["path"]).expanduser().resolve()
+    matches = [record for record in records if Path(record["path"]).resolve() == path and record.get("file") == row.get("file")]
+    if len(matches) != 1:
+        raise ValueError("Candidate is missing or ambiguous in the complete phase snapshot")
+    record = matches[0]
+    if audit != record["relaxation"]:
+        raise ValueError("Candidate CSV convergence audit differs from its energy snapshot")
+    if row.get("structure_sha256") != record["structure_sha256"]:
+        raise ValueError("Candidate CSV and snapshot geometry hashes differ")
+    energy = float(row["energy_total_eV"])
+    if not math.isfinite(energy) or not math.isclose(energy, float(record["energy_total_eV"]), rel_tol=1e-10, abs_tol=1e-8):
+        raise ValueError("Candidate CSV and snapshot CHGNet energies differ")
+    structure = validate_relaxed_record(record, settings)
+    index = next(index for index, entry in enumerate(entries) if entry.name == record["id"])
+    return Candidate(row=row, structure=structure, entry=entries[index]), index
+
+
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    from mattersim_relaxation import settings_from_args
+    settings = settings_from_args(args)
+    stable_csv = Path(args.stable_csv).expanduser().resolve()
     rows = load_stable_rows(stable_csv)
-
-    grouped_rows: Dict[str, List[Dict[str, str]]] = defaultdict(list)
-    for row in rows:
-        grouped_rows[row["chemsys"]].append(row)
-
+    snapshot_path = (args.reference_snapshot or stable_csv.parent / "relaxation" / "reference_entries.json").expanduser().resolve()
     voltages = generate_voltage_grid(args.voltage_min, args.voltage_max, args.voltage_step)
     work_element = Element(args.working_element)
+    grouped_rows = defaultdict(list)
+    for row in rows:
+        grouped_rows[row["chemsys"]].append(row)
+    results = []
 
-    model = CHGNet.load()
-    print("[INFO] CHGNet model loaded for voltage window analysis.")
+    def add_record(row, result):
+        results.append({**row, **result.as_record()})
 
-    results: List[Dict[str, object]] = []
-
-    def add_record(row: Dict[str, str], result: VoltageWindowResult) -> None:
-        record = {key: row.get(key) for key in ("file", "path", "formula", "chemsys")}
-        record.update(result.as_record())
-        results.append(record)
-
-    def record_failure(row: Dict[str, str], error: str) -> None:
+    def record_failure(row, error):
         print(f"[WARN] {row.get('file', row.get('path'))}: {error}")
-        add_record(
-            row,
-            VoltageWindowResult(
-                window_status="calculation_failed",
-                target_voltage=args.target_voltage,
-                energy_tolerance_eV=args.threshold,
-                e_above_hull_unit=f"eV/non-{work_element.symbol} atom",
-                error=error,
-            ),
-        )
+        add_record(row, VoltageWindowResult(
+            window_status="calculation_failed", target_voltage=args.target_voltage,
+            energy_tolerance_eV=args.threshold,
+            e_above_hull_unit=f"eV/non-{work_element.symbol} atom", error=error,
+        ))
 
-    # Keep MP responses as dicts to avoid older local document-model validation
-    # rejecting newer alphanumeric Materials Project ids.
-    with MPRester(args.mp_api_key, use_document_model=False) as mpr:
+    try:
+        snapshot = load_reference_snapshot(snapshot_path, settings)
+    except Exception as exc:
+        for row in rows:
+            record_failure(row, str(exc))
+    else:
         for chemsys, chemsys_rows in grouped_rows.items():
-            print(f"[INFO] Processing chemical system {chemsys} ({len(chemsys_rows)} candidates)")
-            build_failures: List[Tuple[Dict[str, str], str]] = []
-            candidates = build_candidates(chemsys_rows, build_failures)
-            for row, error in build_failures:
-                record_failure(row, error)
-            if not candidates:
-                print(f"[WARN] No valid candidates found for {chemsys}, skipping.")
-                continue
-
             try:
-                comp_structs = fetch_mp_competitor_structures(
-                    chemsys, mpr, args.max_mp_competitors
-                )
-                if not comp_structs:
-                    raise ValueError(f"No MP competitor structures obtained for {chemsys}")
-                comp_entries = structures_to_entries(comp_structs, model)
-                if not comp_entries:
-                    raise ValueError(f"Competitor entries empty for {chemsys}")
-                if len(comp_entries) != len(comp_structs):
-                    raise ValueError(
-                        "Incomplete competing-phase energies: "
-                        f"evaluated {len(comp_entries)} of {len(comp_structs)} structures"
-                    )
-                mu_ref = locate_reference_mu(comp_entries, work_element)
+                entries, candidate_records = snapshot_phase_entries(snapshot, chemsys, settings)
+                mu_ref = locate_reference_mu(entries, work_element)
                 if mu_ref is None or not math.isfinite(mu_ref):
-                    raise ValueError(f"No finite unary reference for {work_element} in {chemsys}")
+                    raise ValueError(f"No finite optimized unary reference for {work_element}")
             except Exception as exc:
-                for cand in candidates:
-                    record_failure(cand.row, f"Competing-phase preparation failed: {exc}")
+                for row in chemsys_rows:
+                    record_failure(row, f"Complete phase snapshot validation failed: {exc}")
                 continue
+            for row in chemsys_rows:
+                try:
+                    candidate, index = validated_snapshot_candidate(
+                        row, candidate_records, entries, settings, snapshot_path)
+                    if work_element not in candidate.structure.composition.elements:
+                        raise ValueError(f"Working element {work_element} absent in candidate")
+                    result = evaluate_voltage_window(
+                        candidate, entries, index, work_element, mu_ref, voltages,
+                        args.threshold, args.target_voltage)
+                    add_record(row, result)
+                except Exception as exc:
+                    record_failure(row, str(exc))
 
-            base_entries = comp_entries + [cand.entry for cand in candidates]
-
-            for local_idx, cand in enumerate(candidates):
-                if work_element not in {el for el in cand.entry.composition.elements}:
-                    record_failure(
-                        cand.row, f"Working element {work_element} absent in candidate"
-                    )
-                    continue
-
-                result = evaluate_voltage_window(
-                    candidate=cand,
-                    base_entries=base_entries,
-                    candidate_index=len(comp_entries) + local_idx,
-                    work_element=work_element,
-                    mu_ref=mu_ref,
-                    voltages=voltages,
-                    energy_tol=args.threshold,
-                    target_voltage=args.target_voltage,
-                )
-                if result.error:
-                    print(f"[WARN] {cand.row.get('file')}: {result.error}")
-                add_record(cand.row, result)
-
-    if not results:
-        raise SystemExit("Voltage window analysis produced no results. Inspect warnings above.")
-
-    out_path = Path(args.out)
+    out_path = Path(args.out).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = ["file", "path", "formula", "chemsys", *VoltageWindowResult().as_record()]
-    with out_path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+    fieldnames = list(dict.fromkeys(key for row in results for key in row))
+    with out_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        for row in results:
-            writer.writerow(row)
-
-    print(f"[INFO] Saved voltage window metrics to {out_path} ({len(results)} rows)")
+        writer.writerows(results)
+    print(f"[INFO] Reused uniform optimized phase snapshot; wrote {len(results)} voltage rows to {out_path}")
 
 
 if __name__ == "__main__":
